@@ -60,6 +60,7 @@ class SolarEdgeWeb:
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self._equipment: dict[int, dict[str, Any]] = {}
         self._last_login_time = 0.0
+        self._smart_home_visited = False
 
     async def async_login(self) -> None:
         """Login to the SolarEdge Web."""
@@ -68,6 +69,7 @@ class SolarEdgeWeb:
             _LOGGER.debug("Skipping login. Using existing valid SSO cookie")
             return
         self._equipment = {}
+        self._smart_home_visited = False
         url = "https://monitoring.solaredge.com/solaredge-apigw/api/login"
         try:
             resp = await self.session.post(
@@ -118,6 +120,44 @@ class SolarEdgeWeb:
             extract_nested_data(top_level_child, self._equipment)
         _LOGGER.debug("Found %s equipment for site: %s", len(self._equipment), self.site_id)
         return self._equipment
+
+    async def async_get_home_automation_devices(self) -> dict[str, Any]:
+        """Get home automation devices from the SolarEdge Web API.
+
+        Returns device information from the home automation API endpoint.
+        
+        Note: This endpoint requires visiting the Smart Home page first to
+        establish the proper session state before the API call will succeed.
+        """
+        _LOGGER.debug("Fetching home automation devices for site: %s", self.site_id)
+        await self.async_login()
+        
+        # Visit the Smart Home page first to establish session state
+        # This is required for the API to return device data
+        if not self._smart_home_visited:
+            smart_home_url = f"https://monitoring.solaredge.com/solaredge-web/p/site/{self.site_id}/#/smart-home"
+            _LOGGER.debug("Visiting Smart Home page to establish session: %s", smart_home_url)
+            try:
+                resp = await self.session.get(smart_home_url, timeout=self.timeout)
+                _LOGGER.debug("Smart Home page returned %s", resp.status)
+                resp.raise_for_status()
+                self._smart_home_visited = True
+            except aiohttp.ClientError:
+                _LOGGER.exception("Error visiting Smart Home page %s", smart_home_url)
+                raise
+        
+        url = f"https://monitoring.solaredge.com/services/api/homeautomation/v1.0/sites/{self.site_id}/devices"
+        
+        try:
+            resp = await self.session.get(url, timeout=self.timeout)
+            _LOGGER.debug("Got %s from %s", resp.status, url)
+            resp.raise_for_status()
+        except aiohttp.ClientError:
+            _LOGGER.exception("Error fetching home automation devices from %s", url)
+            raise
+        resp_json = await resp.json()
+        _LOGGER.debug("Found home automation devices for site: %s", self.site_id)
+        return resp_json
 
     async def async_get_energy_data(self, time_unit: TimeUnit = TimeUnit.WEEK) -> list[EnergyData]:
         """Get energy data from the SolarEdge Web API.
