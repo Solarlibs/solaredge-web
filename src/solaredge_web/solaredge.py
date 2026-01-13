@@ -8,7 +8,7 @@ import logging
 import time
 from datetime import datetime
 from enum import IntEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import aiohttp
 
@@ -125,13 +125,13 @@ class SolarEdgeWeb:
         """Get home automation devices from the SolarEdge Web API.
 
         Returns device information from the home automation API endpoint.
-        
+
         Note: This endpoint requires visiting the Smart Home page first to
         establish the proper session state before the API call will succeed.
         """
         _LOGGER.debug("Fetching home automation devices for site: %s", self.site_id)
         await self.async_login()
-        
+
         # Visit the Smart Home page first to establish session state
         # This is required for the API to return device data
         if not self._smart_home_visited:
@@ -145,9 +145,9 @@ class SolarEdgeWeb:
             except aiohttp.ClientError:
                 _LOGGER.exception("Error visiting Smart Home page %s", smart_home_url)
                 raise
-        
+
         url = f"https://monitoring.solaredge.com/services/api/homeautomation/v1.0/sites/{self.site_id}/devices"
-        
+
         try:
             resp = await self.session.get(url, timeout=self.timeout)
             _LOGGER.debug("Got %s from %s", resp.status, url)
@@ -157,7 +157,7 @@ class SolarEdgeWeb:
             raise
         resp_json = await resp.json()
         _LOGGER.debug("Found home automation devices for site: %s", self.site_id)
-        return resp_json
+        return cast(dict[str, Any], resp_json)
 
     async def async_get_energy_data(self, time_unit: TimeUnit = TimeUnit.WEEK) -> list[EnergyData]:
         """Get energy data from the SolarEdge Web API.
