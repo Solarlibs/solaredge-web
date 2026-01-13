@@ -157,7 +157,7 @@ class SolarEdgeWeb:
             raise
         resp_json = await resp.json()
         _LOGGER.debug("Found home automation devices for site: %s", self.site_id)
-        return cast(dict[str, Any], resp_json)
+        return cast("dict[str, Any]", resp_json)
 
     async def async_get_energy_data(self, time_unit: TimeUnit = TimeUnit.WEEK) -> list[EnergyData]:
         """Get energy data from the SolarEdge Web API.
