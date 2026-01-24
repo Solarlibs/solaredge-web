@@ -209,6 +209,71 @@ class SolarEdgeWeb:
         _LOGGER.debug("Found %s energy data for site: %s", len(energy_data), self.site_id)
         return energy_data
 
+    async def async_set_ev_charging_state(self, device_id: str, level: int) -> bool:
+        """Set the EV charging state to the specified level (0-100).
+
+        device_id: The reporterId of the EV charger device obtained from async_get_home_automation_devices
+        level: The charging level to set (0-100)
+
+        Set the EV charging state to the specified level (0-100).
+        Anything below 100 will disable charging if excess PV is not supported.
+
+        Note: This endpoint requires visiting the Smart Home page first to
+        establish the proper session state before the API call will succeed.
+        """
+        _LOGGER.debug("Setting EV charging state for device %s at site: %s", device_id, self.site_id)
+
+        # Login and ensure we have the necessary cookies
+        await self.async_login()
+        cookie = self._find_cookie("SPRING_SECURITY_REMEMBER_ME_COOKIE")
+        if cookie is None or not cookie.value:
+            _LOGGER.error("SPRING_SECURITY_REMEMBER_ME_COOKIE cookie not found")
+            return False
+
+        # Visit the Smart Home page first to establish session state
+        # This is required for the API to return device data
+        if not self._smart_home_visited:
+            smart_home_url = f"https://monitoring.solaredge.com/solaredge-web/p/site/{self.site_id}/#/smart-home"
+            _LOGGER.debug("Visiting Smart Home page to establish session: %s", smart_home_url)
+            try:
+                resp = await self.session.get(smart_home_url, timeout=self.timeout)
+                _LOGGER.debug("Smart Home page returned %s", resp.status)
+                resp.raise_for_status()
+                self._smart_home_visited = True
+            except aiohttp.ClientError:
+                _LOGGER.exception("Error visiting Smart Home page %s", smart_home_url)
+                raise
+
+        url = f"https://monitoring.solaredge.com/services/m/api/homeautomation/v1.0/{self.site_id}/devices/{device_id}/activationState"
+        headers = {
+            "Cookie": f"SPRING_SECURITY_REMEMBER_ME_COOKIE={cookie.value}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0",
+        }
+        payload = {
+            "mode": "MANUAL",
+            "level": level,
+            "duration": None,
+        }
+
+        try:
+            async with self.session.put(url, headers=headers, json=payload, timeout=self.timeout) as response:
+                if response.status != 200:
+                    _LOGGER.error("Failed to set charging state: %s", response.status)
+                    return False
+
+                result = await response.json()
+                if result.get("status") == "PASSED":
+                    _LOGGER.debug("Successfully set charging state to level %s", level)
+                    return True
+
+                _LOGGER.error("API returned error: %s", result)
+                return False
+        except Exception as err:
+            _LOGGER.error("Error setting charging state: %s", err)
+            return False
+
     def _find_cookie(self, name: str) -> Morsel[str] | None:
         """Find a cookie by name."""
         for cookie in self.session.cookie_jar:
