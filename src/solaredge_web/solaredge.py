@@ -127,7 +127,6 @@ class SolarEdgeWeb:
         This is required before accessing home automation APIs.
         Login is performed and the Smart Home page is visited to set up session state if needed.
         """
-        _LOGGER.debug("Fetching home automation devices for site: %s", self.site_id)
         await self.async_login()
 
         # Visit the Smart Home page first to establish session state
@@ -149,13 +148,10 @@ class SolarEdgeWeb:
 
         Returns device information from the home automation API endpoint.
         """
+        _LOGGER.debug("Fetching home automation devices for site: %s", self.site_id)
 
         # Ensure smart home session is established
-        try:
-            await self._async_ensure_smart_home_session()
-        except Exception as e:
-            _LOGGER.error("Failed to establish smart home session: %s", e)
-            raise
+        await self._async_ensure_smart_home_session()
 
         url = f"https://monitoring.solaredge.com/services/api/homeautomation/v1.0/sites/{self.site_id}/devices"
 
@@ -228,13 +224,10 @@ class SolarEdgeWeb:
 
         Anything below 100 will disable charging if excess PV is not supported.
         """
+        _LOGGER.debug("Setting EV charging state for device: %s to level: %s", device_id, level)
 
         # Ensure smart home session is established
-        try:
-            await self._async_ensure_smart_home_session()
-        except Exception as e:
-            _LOGGER.error("Failed to establish smart home session: %s", e)
-            raise
+        await self._async_ensure_smart_home_session()
 
         cookie = self._find_cookie("SPRING_SECURITY_REMEMBER_ME_COOKIE")
         if cookie is None or not cookie.value:
@@ -242,17 +235,10 @@ class SolarEdgeWeb:
             raise aiohttp.ClientError("SPRING_SECURITY_REMEMBER_ME_COOKIE cookie not found")
 
         url = f"https://monitoring.solaredge.com/services/m/api/homeautomation/v1.0/{self.site_id}/devices/{device_id}/activationState"
-        headers = {
-            "Cookie": f"SPRING_SECURITY_REMEMBER_ME_COOKIE={cookie.value}",
-        }
-        payload = {
-            "mode": "MANUAL",
-            "level": level,
-            "duration": None,
-        }
-
         try:
-            async with self.session.put(url, headers=headers, json=payload, timeout=self.timeout) as resp:
+            async with self.session.put(url,
+                                        json={"mode": "MANUAL", "level": level, "duration": None },
+                                        timeout=self.timeout) as resp:
                 if resp.status != 200:
                     _LOGGER.error("Failed to set charging state: %s", resp.status)
                     resp.raise_for_status()
