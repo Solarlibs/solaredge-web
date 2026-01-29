@@ -234,14 +234,10 @@ class SolarEdgeWeb:
 
         url = f"https://monitoring.solaredge.com/services/m/api/homeautomation/v1.0/{self.site_id}/devices/{device_id}/activationState"
         try:
-            resp = await self.session.put(
-                url,
-                json={"mode": "MANUAL", "level": level, "duration": None},
-                timeout=self.timeout
-            )
+            resp = await self.session.put(url, json={"mode": "MANUAL", "level": level, "duration": None}, timeout=self.timeout)
             if resp.status != 200:
-                    _LOGGER.error("Failed to set charging state: %s", resp.status)
-                    resp.raise_for_status()
+                _LOGGER.error("Failed to set charging state: %s", resp.status)
+                resp.raise_for_status()
         except aiohttp.ClientError:
             _LOGGER.exception("Error setting EV charging state at %s", url)
             raise
