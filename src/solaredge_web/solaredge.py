@@ -150,7 +150,6 @@ class SolarEdgeWeb:
         """
         _LOGGER.debug("Fetching home automation devices for site: %s", self.site_id)
 
-        # Ensure smart home session is established
         await self._async_ensure_smart_home_session()
 
         url = f"https://monitoring.solaredge.com/services/api/homeautomation/v1.0/sites/{self.site_id}/devices"
@@ -226,7 +225,6 @@ class SolarEdgeWeb:
         """
         _LOGGER.debug("Setting EV charging state for device: %s to level: %s", device_id, level)
 
-        # Ensure smart home session is established
         await self._async_ensure_smart_home_session()
 
         cookie = self._find_cookie("SPRING_SECURITY_REMEMBER_ME_COOKIE")
