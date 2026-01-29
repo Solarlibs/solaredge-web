@@ -122,7 +122,7 @@ class SolarEdgeWeb:
         return self._equipment
 
     async def _async_ensure_smart_home_session(self) -> None:
-        """ Ensure that the smart home session is established.
+        """Ensure that the smart home session is established.
 
         This is required before accessing home automation APIs.
         Login is performed and the Smart Home page is visited to set up session state if needed.
@@ -234,9 +234,9 @@ class SolarEdgeWeb:
 
         url = f"https://monitoring.solaredge.com/services/m/api/homeautomation/v1.0/{self.site_id}/devices/{device_id}/activationState"
         try:
-            async with self.session.put(url,
-                                        json={"mode": "MANUAL", "level": level, "duration": None },
-                                        timeout=self.timeout) as resp:
+            async with self.session.put(
+                url, json={"mode": "MANUAL", "level": level, "duration": None}, timeout=self.timeout
+            ) as resp:
                 if resp.status != 200:
                     _LOGGER.error("Failed to set charging state: %s", resp.status)
                     resp.raise_for_status()
