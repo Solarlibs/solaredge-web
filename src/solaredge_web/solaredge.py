@@ -234,23 +234,25 @@ class SolarEdgeWeb:
 
         url = f"https://monitoring.solaredge.com/services/m/api/homeautomation/v1.0/{self.site_id}/devices/{device_id}/activationState"
         try:
-            async with self.session.put(
-                url, json={"mode": "MANUAL", "level": level, "duration": None}, timeout=self.timeout
-            ) as resp:
-                if resp.status != 200:
+            resp = await self.session.put(
+                url,
+                json={"mode": "MANUAL", "level": level, "duration": None},
+                timeout=self.timeout
+            )
+            if resp.status != 200:
                     _LOGGER.error("Failed to set charging state: %s", resp.status)
                     resp.raise_for_status()
-
-                resp_json = await resp.json()
-                if resp_json.get("status") == "PASSED":
-                    _LOGGER.debug("Successfully set charging state to level %s", level)
-                    return
-
-                _LOGGER.error("API failed with status: %s", resp_json.get("status"))
-                raise aiohttp.ClientError(f"API failed with status: {resp_json.get('status')}")
         except aiohttp.ClientError:
             _LOGGER.exception("Error setting EV charging state at %s", url)
             raise
+
+        resp_json = await resp.json()
+        if resp_json.get("status") == "PASSED":
+            _LOGGER.debug("Successfully set charging state to level %s", level)
+            return
+
+        _LOGGER.error("API failed with status: %s", resp_json.get("status"))
+        raise aiohttp.ClientError(f"API failed with status: {resp_json.get('status')}")
 
     def _find_cookie(self, name: str) -> Morsel[str] | None:
         """Find a cookie by name."""
