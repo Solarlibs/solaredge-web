@@ -1,9 +1,8 @@
 """A python client library for SolarEdge Web."""
 
-from .solaredge import EnergyData, SolarEdgeWeb, TimeUnit
+from .solaredge import EnergyData, SolarEdgeWeb
 
 __all__ = [
     "EnergyData",
     "SolarEdgeWeb",
-    "TimeUnit",
 ]

@@ -1,1 +1,1 @@
-"""Tests for SolarEdge Web."""
+"""Test package for SolarEdge Web."""
