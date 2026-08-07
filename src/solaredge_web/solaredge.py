@@ -180,8 +180,13 @@ class SolarEdgeWeb:
                     return qs["code"][0]
         return None
 
-    async def async_get_equipment(self) -> dict[str, dict[str, Any]]:
-        """Get equipment keyed by full serial number. Cached after first call."""
+    async def async_get_equipment(self, include_inactive: bool = False) -> dict[str, dict[str, Any]]:
+        """Get equipment keyed by full serial number. Cached after first call.
+
+        Retired/replaced equipment (``properties.status == "INACTIVE"``) is
+        excluded by default, because it keeps the same display name as its live
+        replacement. Pass ``include_inactive=True`` to include those units.
+        """
         await self.async_login()
         if self._equipment:
             _LOGGER.debug(
@@ -189,7 +194,7 @@ class SolarEdgeWeb:
                 len(self._equipment),
                 self.site_id,
             )
-            return self._equipment
+            return self._equipment if include_inactive else _exclude_inactive(self._equipment)
 
         _LOGGER.debug("Fetching equipment for site: %s", self.site_id)
         url = (
@@ -220,7 +225,7 @@ class SolarEdgeWeb:
         if self._site_structure:
             extract_nested(self._site_structure, self._equipment)
         _LOGGER.debug("Found %s equipment for site: %s", len(self._equipment), self.site_id)
-        return self._equipment
+        return self._equipment if include_inactive else _exclude_inactive(self._equipment)
 
     async def async_get_energy_data(
         self,
@@ -295,6 +300,15 @@ def _to_utc_iso(dt: datetime) -> str:
 def _device_id(node: dict[str, Any]) -> str | None:
     """Extract the device ID from a layout node, matching async_get_equipment."""
     return node.get("serial") or node.get("properties", {}).get("identifier") or node.get("uuid")
+
+
+def _exclude_inactive(equipment: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Return equipment without retired (``properties.status == "INACTIVE"``) units."""
+    return {
+        equipment_id: data
+        for equipment_id, data in equipment.items()
+        if data.get("properties", {}).get("status") != "INACTIVE"
+    }
 
 
 def _build_opt_to_parent_map(

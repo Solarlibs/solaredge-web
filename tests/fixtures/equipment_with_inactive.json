@@ -1,0 +1,76 @@
+{
+    "siteStructure": {
+        "type": "SITE",
+        "name": "Test Site",
+        "properties": {
+            "identifier": "TESTSITE01",
+            "model": "TestModel"
+        },
+        "children": [
+            {
+                "type": "FOLDER",
+                "name": "INVERTER",
+                "children": [
+                    {
+                        "type": "INVERTER",
+                        "name": "Inverter 1",
+                        "serial": "7E012345-57",
+                        "displayOrder": "1",
+                        "properties": {
+                            "identifier": "7E012345",
+                            "model": "SE7600H"
+                        },
+                        "children": [
+                            {
+                                "type": "STRING",
+                                "name": "String 1",
+                                "displayOrder": "1.1",
+                                "properties": {
+                                    "identifier": "7E012345_31"
+                                },
+                                "children": [
+                                    {
+                                        "type": "OPTIMIZER",
+                                        "name": "Optimizer 1.1",
+                                        "serial": "7A012345-CA",
+                                        "displayOrder": "1.1",
+                                        "properties": {
+                                            "identifier": "7A012345",
+                                            "model": "S440",
+                                            "status": "ACTIVE"
+                                        },
+                                        "children": []
+                                    },
+                                    {
+                                        "type": "OPTIMIZER",
+                                        "name": "Optimizer 1.1",
+                                        "serial": "7A012340-CA",
+                                        "displayOrder": "1.1",
+                                        "properties": {
+                                            "identifier": "7A012340",
+                                            "model": "S440",
+                                            "status": "INACTIVE"
+                                        },
+                                        "children": []
+                                    },
+                                    {
+                                        "type": "OPTIMIZER",
+                                        "name": "Optimizer 1.2",
+                                        "serial": "7A012346-CA",
+                                        "displayOrder": "1.2",
+                                        "properties": {
+                                            "identifier": "7A012346",
+                                            "model": "S440",
+                                            "status": "ACTIVE"
+                                        },
+                                        "children": []
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+}

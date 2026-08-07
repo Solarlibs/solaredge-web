@@ -207,6 +207,55 @@ async def test_async_get_equipment_skips_login_with_valid_sso():
     session.post.assert_not_awaited()
 
 
+async def test_async_get_equipment_excludes_inactive_by_default():
+    """Retired optimizers (INACTIVE) are excluded by default, incl. from cache."""
+    equipment_json = _load_fixture("equipment_with_inactive.json")
+    sso_cookie = _make_cookie("SolarEdge_SSO-1.4", "sso_value")
+
+    equipment_resp = _mock_response(json_data=equipment_json)
+    session = _make_mock_session(cookies=[sso_cookie])
+    session.get = AsyncMock(side_effect=[equipment_resp])
+    session.post = AsyncMock()
+
+    client = SolarEdgeWeb("u", "p", "123", session, timeout=5)
+    client._last_login_time = 1e12
+    client._auth_headers = {"Authorization": "Bearer test"}
+
+    # Live replacement and other active optimizers are kept...
+    equipment = await client.async_get_equipment()
+    assert "7A012345-CA" in equipment
+    assert "7A012346-CA" in equipment
+    # ...the retired unit sharing its name is not.
+    assert "7A012340-CA" not in equipment
+    # Devices without a status field (inverter, string) are preserved.
+    assert "7E012345-57" in equipment
+    assert "7E012345_31" in equipment
+
+    # Same result on the cached second call.
+    equipment = await client.async_get_equipment()
+    assert "7A012340-CA" not in equipment
+    assert "7A012345-CA" in equipment
+
+
+async def test_async_get_equipment_include_inactive_returns_all():
+    """include_inactive=True keeps retired units."""
+    equipment_json = _load_fixture("equipment_with_inactive.json")
+    sso_cookie = _make_cookie("SolarEdge_SSO-1.4", "sso_value")
+
+    equipment_resp = _mock_response(json_data=equipment_json)
+    session = _make_mock_session(cookies=[sso_cookie])
+    session.get = AsyncMock(side_effect=[equipment_resp])
+    session.post = AsyncMock()
+
+    client = SolarEdgeWeb("u", "p", "123", session, timeout=5)
+    client._last_login_time = 1e12
+    client._auth_headers = {"Authorization": "Bearer test"}
+
+    equipment = await client.async_get_equipment(include_inactive=True)
+    assert "7A012340-CA" in equipment
+    assert "7A012345-CA" in equipment
+
+
 async def test_async_get_energy_data_includes_aggregations():
     """async_get_energy_data returns per-optimizer, string, inverter, and site values."""
     playback_json = _load_fixture("playback.json")
