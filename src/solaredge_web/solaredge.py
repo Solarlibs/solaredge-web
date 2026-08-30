@@ -11,7 +11,7 @@ import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
@@ -30,6 +30,9 @@ _OAUTH_TOKEN_URL = "https://login.solaredge.com/oauth2/token"  # noqa: S105
 _AUTH_EXCHANGE_URL = "https://monitoring.solaredge.com/services/auth/token?legacy=false"
 
 _MONITORING_HOST = "monitoring.solaredge.com"
+# Credentials and OAuth codes are only ever sent to / accepted from this domain.
+_SOLAREDGE_DOMAIN = "solaredge.com"
+
 # Cookie set by the monitoring backend once the OAuth token exchange succeeds.
 # Its presence means the session is still usable and login can be skipped.
 _SESSION_COOKIE_NAME = "se_monitoring_auth"
@@ -38,9 +41,28 @@ _SESSION_COOKIE_NAME = "se_monitoring_auth"
 _LOGIN_REFRESH_SECONDS = 3600
 
 
-def _raise_login_error() -> None:
-    """Raise a login error (extracted to satisfy TRY301)."""
-    raise aiohttp.ClientError("Failed to extract authorization code during login.")
+def _raise_login_error(
+    resp: aiohttp.ClientResponse,
+    message: str = "Failed to extract authorization code during login.",
+) -> NoReturn:
+    """Raise a 401 for a failed login (extracted to satisfy TRY301).
+
+    ``ClientResponseError`` rather than a plain ``ClientError`` so that callers
+    can tell bad credentials apart from a transient failure. Home Assistant's
+    config flow maps status 401/403 to ``invalid_auth``.
+    """
+    raise aiohttp.ClientResponseError(
+        request_info=resp.request_info,
+        history=resp.history,
+        status=401,
+        message=message,
+    )
+
+
+def _is_solaredge_url(url: str) -> bool:
+    """Return True if the URL points at a solaredge.com host."""
+    host = (urlparse(url).hostname or "").lower()
+    return host == _SOLAREDGE_DOMAIN or host.endswith(f".{_SOLAREDGE_DOMAIN}")
 
 
 @dataclasses.dataclass
@@ -116,7 +138,7 @@ class SolarEdgeWeb:
                 code = await self._submit_login_form(resp)
 
             if not code:
-                _raise_login_error()
+                _raise_login_error(resp)
 
             _LOGGER.debug("Successfully obtained authorization code.")
 
@@ -161,6 +183,7 @@ class SolarEdgeWeb:
         raw_html = await resp.text()
         action = html.unescape(str(resp.url))
         form_match = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', raw_html, re.IGNORECASE)
+        form_html = raw_html
         if form_match:
             parsed_action = html.unescape(form_match.group(1))
             if parsed_action.startswith("/"):
@@ -168,14 +191,19 @@ class SolarEdgeWeb:
                 action = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_action}"
             else:
                 action = parsed_action
+            # Only scrape inputs belonging to this form, not the whole page.
+            form_end = raw_html.lower().find("</form>", form_match.end())
+            form_html = raw_html[form_match.end() : form_end if form_end != -1 else len(raw_html)]
 
-        form_data: dict[str, str] = {}
-        for input_match in re.finditer(r"<input[^>]+>", raw_html, re.IGNORECASE):
-            attrs = input_match.group(0)
-            name_m = re.search(r'name=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
-            value_m = re.search(r'value=["\']([^"\']*)["\']', attrs, re.IGNORECASE)
-            if name_m:
-                form_data[html.unescape(name_m.group(1))] = html.unescape(value_m.group(1)) if value_m else ""
+        # Never post credentials to a host outside solaredge.com.
+        if not _is_solaredge_url(action):
+            _LOGGER.error("Refusing to submit credentials to unexpected host: %s", action)
+            _raise_login_error(resp, "Login form points at an unexpected host.")
+
+        form_data = _extract_form_inputs(form_html)
+        if not form_data:
+            # Fall back to the whole page if the form span looked empty.
+            form_data = _extract_form_inputs(raw_html)
 
         form_data["username"] = self.username
         form_data["password"] = self.password
@@ -188,7 +216,10 @@ class SolarEdgeWeb:
     def _extract_code_from_history(self, resp: aiohttp.ClientResponse) -> str | None:
         """Scan redirect history for the OAuth authorization code."""
         for r in [*resp.history, resp]:
-            parsed = urlparse(str(r.url))
+            url = str(r.url)
+            if not _is_solaredge_url(url):
+                continue
+            parsed = urlparse(url)
             if "callback" in parsed.path:
                 qs = parse_qs(parsed.query)
                 if "error" in qs:
@@ -312,6 +343,18 @@ class SolarEdgeWeb:
             if domain == host or host.endswith(f".{domain}"):
                 return cookie
         return None
+
+
+def _extract_form_inputs(raw_html: str) -> dict[str, str]:
+    """Collect name/value pairs from every ``<input>`` in the given HTML."""
+    form_data: dict[str, str] = {}
+    for input_match in re.finditer(r"<input[^>]+>", raw_html, re.IGNORECASE):
+        attrs = input_match.group(0)
+        name_m = re.search(r'name=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+        value_m = re.search(r'value=["\']([^"\']*)["\']', attrs, re.IGNORECASE)
+        if name_m:
+            form_data[html.unescape(name_m.group(1))] = html.unescape(value_m.group(1)) if value_m else ""
+    return form_data
 
 
 def _as_naive(dt: datetime) -> datetime:

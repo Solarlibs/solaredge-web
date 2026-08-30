@@ -362,6 +362,52 @@ async def test_async_get_energy_data_empty_response():
     assert result == []
 
 
+async def test_login_failure_raises_401():
+    """Bad credentials surface as a 401 so HA reports invalid_auth, not cannot_connect."""
+    # No callback in the redirect history: the login form was re-served.
+    login_page = _mock_response(
+        text='<html><form action="/login"><input name="csrf" value="abc"></form></html>',
+        url="https://login.solaredge.com/login",
+    )
+    session = _make_mock_session()
+    session.get = AsyncMock(side_effect=[login_page])
+    session.post = AsyncMock(side_effect=[login_page])
+
+    client = SolarEdgeWeb("u", "wrong-password", "123", session, timeout=5)
+    with pytest.raises(aiohttp.ClientResponseError) as err:
+        await client.async_login()
+    assert err.value.status == 401
+
+
+async def test_login_refuses_foreign_form_action():
+    """Credentials are never posted to a host outside solaredge.com."""
+    login_page = _mock_response(
+        text='<html><form action="https://evil.example.com/steal"><input name="csrf" value="abc"></form></html>',
+        url="https://login.solaredge.com/login",
+    )
+    session = _make_mock_session()
+    session.get = AsyncMock(side_effect=[login_page])
+    session.post = AsyncMock()
+
+    client = SolarEdgeWeb("u", "p", "123", session, timeout=5)
+    with pytest.raises(aiohttp.ClientResponseError) as err:
+        await client.async_login()
+    assert err.value.status == 401
+    session.post.assert_not_awaited()
+
+
+async def test_extract_code_ignores_foreign_callback():
+    """An authorization code is only accepted from a solaredge.com host."""
+    session = _make_mock_session()
+    client = SolarEdgeWeb("u", "p", "123", session, timeout=5)
+
+    foreign = _mock_response(url="https://evil.example.com/mfe/auth/callback?code=stolen")
+    assert client._extract_code_from_history(foreign) is None
+
+    genuine = _mock_response(url="https://monitoring.solaredge.com/mfe/auth/callback?code=good")
+    assert client._extract_code_from_history(genuine) == "good"
+
+
 async def test_async_get_equipment_http_error():
     """A non-200 from the layout endpoint propagates as ClientResponseError."""
     session_cookie = _make_cookie("se_monitoring_auth", "session_value")
