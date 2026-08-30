@@ -13,7 +13,12 @@ import aiohttp
 import pytest
 
 from solaredge_web import SolarEdgeWeb
-from solaredge_web.solaredge import _build_opt_to_parent_map, _decode_playback, _to_utc_iso
+from solaredge_web.solaredge import (
+    _build_opt_to_parent_map,
+    _decode_playback,
+    _decode_playback_verbose,
+    _to_utc_iso,
+)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -344,14 +349,15 @@ async def test_async_get_energy_data_sends_auth_and_csrf_headers():
 
 
 async def test_async_get_energy_data_empty_response():
-    """Empty playback response returns an empty list."""
+    """Empty playback response returns an empty list, even after the fallback."""
     equipment_json = _load_fixture("equipment.json")
     session_cookie = _make_cookie("se_monitoring_auth", "session_value")
     session = _make_mock_session(cookies=[session_cookie])
 
     equipment_resp = _mock_response(json_data=equipment_json)
     empty_resp = _mock_response(json_data={"timeSlotsCount": 0, "optimizerSerials": [], "compressPowerData": []})
-    session.get = AsyncMock(side_effect=[equipment_resp, empty_resp])
+    empty_verbose_resp = _mock_response(json_data={"optimizerPowerMeasurementsList": []})
+    session.get = AsyncMock(side_effect=[equipment_resp, empty_resp, empty_verbose_resp])
 
     client = SolarEdgeWeb("u", "p", "123", session, timeout=5)
     client._last_login_time = 1e12
@@ -361,6 +367,186 @@ async def test_async_get_energy_data_empty_response():
     end = datetime(2026, 7, 30, 4, 0, 0, tzinfo=timezone.utc)
     result = await client.async_get_energy_data(start, end)
     assert result == []
+
+
+def test_decode_playback_header_only_returns_empty(caplog):
+    """A header-only compressPowerData warns instead of yielding silent zeros.
+
+    See https://github.com/Solarlibs/solaredge-web/issues/13
+    """
+    start = datetime(2026, 7, 30, 0, 0, 0, tzinfo=timezone.utc)
+    resp = {
+        "timeSlotsCount": 48,
+        "optimizerSerials": [f"7A01234{i}" for i in range(10)],
+        "compressPowerData": [2.0, 2.0],
+    }
+    with caplog.at_level(logging.WARNING):
+        assert _decode_playback(resp, start, {}) == []
+    assert "no measurements" in caplog.text
+
+
+def test_decode_playback_malformed_header_returns_empty():
+    """Truncated or non-numeric headers return [] instead of raising."""
+    start = datetime(2026, 7, 30, 0, 0, 0, tzinfo=timezone.utc)
+    # Only the version entry, no data_start_idx.
+    assert _decode_playback({"timeSlotsCount": 4, "optimizerSerials": ["X"], "compressPowerData": [2.0]}, start, {}) == []
+    # Non-numeric header.
+    assert (
+        _decode_playback(
+            {"timeSlotsCount": 4, "optimizerSerials": ["X"], "compressPowerData": [2.0, "nope", 0.0, 0.0, 1.0]},
+            start,
+            {},
+        )
+        == []
+    )
+    # Non-numeric timeSlotsCount.
+    assert (
+        _decode_playback({"timeSlotsCount": "many", "optimizerSerials": ["X"], "compressPowerData": [2.0, 4.0]}, start, {})
+        == []
+    )
+
+
+def test_decode_playback_verbose_matches_compact():
+    """The verbose decoder produces the same values and slots as the compact one."""
+    verbose = _load_fixture("playback_verbose.json")
+    site_structure = _load_fixture("equipment.json")["siteStructure"]
+
+    result = _decode_playback_verbose(verbose, site_structure)
+
+    # Sparse: only the three slots that carry production.
+    assert [ed.start_time for ed in result] == [
+        datetime(2026, 7, 30, 1, 0),
+        datetime(2026, 7, 30, 3, 0),
+        datetime(2026, 7, 31, 9, 0),
+    ]
+    # measurementTime carries the site offset; slots come back naive local.
+    assert all(ed.start_time.tzinfo is None for ed in result)
+
+    slot1 = result[0].values
+    assert slot1["7A012345-CA"] == 100.0
+    assert slot1["7A012346-CA"] == 50.0
+    assert slot1["7E012345_31"] == 150.0
+    assert slot1["7E012345-57"] == 150.0
+    assert slot1["TESTSITE01"] == 150.0
+
+
+def test_decode_playback_verbose_filters_to_window():
+    """Measurements outside [start_date, end_date] are dropped."""
+    verbose = _load_fixture("playback_verbose.json")
+    site_structure = _load_fixture("equipment.json")["siteStructure"]
+
+    result = _decode_playback_verbose(
+        verbose,
+        site_structure,
+        datetime(2026, 7, 30, 0, 0),
+        datetime(2026, 7, 30, 4, 0),
+    )
+
+    assert [ed.start_time for ed in result] == [datetime(2026, 7, 30, 1, 0), datetime(2026, 7, 30, 3, 0)]
+
+
+def test_decode_playback_verbose_empty():
+    """A verbose response without measurements returns an empty list."""
+    assert _decode_playback_verbose({}, {}) == []
+
+
+async def test_async_get_energy_data_falls_back_to_verbose():
+    """A header-only compact payload falls back to the verbose endpoint."""
+    equipment_json = _load_fixture("equipment.json")
+    verbose_json = _load_fixture("playback_verbose.json")
+    session_cookie = _make_cookie("se_monitoring_auth", "session_value")
+    session = _make_mock_session(cookies=[session_cookie])
+
+    equipment_resp = _mock_response(json_data=equipment_json)
+    header_only_resp = _mock_response(
+        json_data={
+            "timeSlotsCount": 4,
+            "optimizerSerials": ["7A012345", "7A012346"],
+            "compressPowerData": [2.0, 2.0],
+        }
+    )
+    session.get = AsyncMock(
+        side_effect=[
+            equipment_resp,
+            header_only_resp,
+            _mock_response(json_data=verbose_json),
+            _mock_response(json_data=verbose_json),
+        ]
+    )
+
+    client = SolarEdgeWeb("u", "p", "123", session, timeout=5)
+    client._last_login_time = 1e12
+    client._auth_headers = {"Authorization": "Bearer test"}
+
+    start = datetime(2026, 7, 30, 0, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 30, 4, 0, 0, tzinfo=timezone.utc)
+    result = await client.async_get_energy_data(start, end)
+
+    # Compact first, then verbose with the window as-is to learn the offset.
+    assert "optimizers-compact" in session.get.await_args_list[1].args[0]
+    probe_url = session.get.await_args_list[2].args[0]
+    assert "/optimizers?" in probe_url
+    assert "start-date=2026-07-30T00:00:00Z" in probe_url
+
+    # The fixture is stamped -07:00, so the window is re-requested shifted by +7h.
+    shifted_url = session.get.await_args_list[3].args[0]
+    assert "start-date=2026-07-30T07:00:00Z" in shifted_url
+    assert "end-date=2026-07-30T11:00:00Z" in shifted_url
+    assert client._site_utc_offset == timedelta(hours=-7)
+
+    # The result is filtered back to the requested local window.
+    assert [ed.start_time for ed in result] == [datetime(2026, 7, 30, 1, 0), datetime(2026, 7, 30, 3, 0)]
+    assert result[0].values["7A012345-CA"] == 100.0
+    assert result[0].values["TESTSITE01"] == 150.0
+
+
+async def test_verbose_fallback_reuses_cached_offset():
+    """Once the site UTC offset is known, the verbose window is fetched once."""
+    equipment_json = _load_fixture("equipment.json")
+    verbose_json = _load_fixture("playback_verbose.json")
+    session_cookie = _make_cookie("se_monitoring_auth", "session_value")
+    session = _make_mock_session(cookies=[session_cookie])
+
+    header_only = {"timeSlotsCount": 4, "optimizerSerials": ["7A012345"], "compressPowerData": [2.0, 2.0]}
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=equipment_json),
+            _mock_response(json_data=header_only),
+            _mock_response(json_data=verbose_json),
+        ]
+    )
+
+    client = SolarEdgeWeb("u", "p", "123", session, timeout=5)
+    client._last_login_time = 1e12
+    client._auth_headers = {"Authorization": "Bearer test"}
+    client._site_utc_offset = timedelta(hours=-7)
+
+    result = await client.async_get_energy_data(datetime(2026, 7, 30, 0, 0, 0), datetime(2026, 7, 30, 4, 0, 0))
+
+    assert session.get.await_count == 3
+    assert "start-date=2026-07-30T07:00:00Z" in session.get.await_args_list[2].args[0]
+    assert [ed.start_time for ed in result] == [datetime(2026, 7, 30, 1, 0), datetime(2026, 7, 30, 3, 0)]
+
+
+async def test_async_get_energy_data_no_fallback_when_compact_has_data():
+    """The verbose endpoint is not called when the compact response is usable."""
+    equipment_json = _load_fixture("equipment.json")
+    playback_json = _load_fixture("playback.json")
+    session_cookie = _make_cookie("se_monitoring_auth", "session_value")
+    session = _make_mock_session(cookies=[session_cookie])
+
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=equipment_json), _mock_response(json_data=playback_json)])
+
+    client = SolarEdgeWeb("u", "p", "123", session, timeout=5)
+    client._last_login_time = 1e12
+    client._auth_headers = {"Authorization": "Bearer test"}
+
+    await client.async_get_energy_data(
+        datetime(2026, 7, 30, 0, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 30, 4, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert session.get.await_count == 2
 
 
 async def test_login_failure_raises_401():
@@ -457,40 +643,3 @@ async def test_login_is_reused_and_cache_survives(caplog):
     # One layout fetch, no OAuth traffic, cache intact across the extra login.
     assert session.get.await_count == 1
     session.post.assert_not_awaited()
-
-
-def test_decode_playback_header_only_returns_empty(caplog):
-    """A header-only compressPowerData warns instead of yielding silent zeros.
-
-    See https://github.com/Solarlibs/solaredge-web/issues/13
-    """
-    start = datetime(2026, 7, 30, 0, 0, 0, tzinfo=timezone.utc)
-    resp = {
-        "timeSlotsCount": 48,
-        "optimizerSerials": [f"7A01234{i}" for i in range(10)],
-        "compressPowerData": [2.0, 2.0],
-    }
-    with caplog.at_level(logging.WARNING):
-        assert _decode_playback(resp, start, {}) == []
-    assert "no measurements" in caplog.text
-
-
-def test_decode_playback_malformed_header_returns_empty():
-    """Truncated or non-numeric headers return [] instead of raising."""
-    start = datetime(2026, 7, 30, 0, 0, 0, tzinfo=timezone.utc)
-    # Only the version entry, no data_start_idx.
-    assert _decode_playback({"timeSlotsCount": 4, "optimizerSerials": ["X"], "compressPowerData": [2.0]}, start, {}) == []
-    # Non-numeric header.
-    assert (
-        _decode_playback(
-            {"timeSlotsCount": 4, "optimizerSerials": ["X"], "compressPowerData": [2.0, "nope", 0.0, 0.0, 1.0]},
-            start,
-            {},
-        )
-        == []
-    )
-    # Non-numeric timeSlotsCount.
-    assert (
-        _decode_playback({"timeSlotsCount": "many", "optimizerSerials": ["X"], "compressPowerData": [2.0, 4.0]}, start, {})
-        == []
-    )

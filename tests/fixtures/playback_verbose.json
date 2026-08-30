@@ -1,0 +1,19 @@
+{
+    "optimizerPowerMeasurementsList": [
+        {
+            "serial": "7A012345",
+            "powerMeasurements": [
+                {"measurementTime": "2026-07-30T01:00:00-07:00", "powerW": 100.0, "color": 0.25},
+                {"measurementTime": "2026-07-30T03:00:00-07:00", "powerW": 120.0, "color": 0.30}
+            ]
+        },
+        {
+            "serial": "7A012346",
+            "powerMeasurements": [
+                {"measurementTime": "2026-07-30T01:00:00-07:00", "powerW": 50.0, "color": 0.13},
+                {"measurementTime": "2026-07-30T03:00:00-07:00", "powerW": 60.0, "color": 0.15},
+                {"measurementTime": "2026-07-31T09:00:00-07:00", "powerW": 42.0, "color": 0.11}
+            ]
+        }
+    ]
+}

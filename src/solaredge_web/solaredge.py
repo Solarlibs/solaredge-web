@@ -40,6 +40,16 @@ _SESSION_COOKIE_NAME = "se_monitoring_auth"
 # Refresh SSO session at most every hour to avoid re-issuing the OAuth flow.
 _LOGIN_REFRESH_SECONDS = 3600
 
+_PLAYBACK_BASE_URL = "https://monitoring.solaredge.com/services/layout/playback/site"
+# The compact endpoint returns a packed array; the verbose one returns explicit
+# per-measurement timestamps. They disagree on how the date range is read, see
+# ``_async_fetch_playback``.
+_PLAYBACK_COMPACT = "optimizers-compact"
+_PLAYBACK_VERBOSE = "optimizers"
+
+# Both playback endpoints reject a range wider than this with BAD_ARGUMENTS.
+_MAX_PLAYBACK_SPAN = timedelta(days=8)
+
 
 def _raise_login_error(
     resp: aiohttp.ClientResponse,
@@ -68,6 +78,8 @@ def _is_solaredge_url(url: str) -> bool:
 @dataclasses.dataclass
 class EnergyData:
     """Energy data for a single hourly time slot.
+
+    start_time is naive and expressed in the site's local time.
 
     values maps equipment serial numbers to energy in Wh. Optimizer values
     are from the API; string, inverter, and site values are aggregated by
@@ -99,6 +111,7 @@ class SolarEdgeWeb:
         self._site_structure: dict[str, Any] = {}
         self._last_login_time = 0.0
         self._auth_headers: dict[str, str] = {}
+        self._site_utc_offset: timedelta | None = None
 
     async def async_login(self) -> None:
         """Login via OAuth2 PKCE. Reuses the monitoring session for 1 hour."""
@@ -263,7 +276,7 @@ class SolarEdgeWeb:
             node_type = node.get("type")
             # Skip container nodes; keep inverters, strings, optimizers.
             if node_type not in ("FOLDER", "SITE"):
-                device_id = node.get("serial") or node.get("properties", {}).get("identifier") or node.get("uuid")
+                device_id = _device_id(node)
                 if device_id:
                     data_dict[device_id] = node
             for child_node in node.get("children", []):
@@ -287,13 +300,18 @@ class SolarEdgeWeb:
         by multiplying by the 1-hour slot duration. String/inverter/site values
         are aggregated by summing child optimizer values.
 
+        Some sites answer the compact endpoint with a header-only payload; for
+        those the verbose ``optimizers`` endpoint is used as a fallback.
+
         If start_date/end_date are not provided, defaults to the last 7 days
-        up to the end of today (in local time).
+        up to the end of today (in local time). The API rejects ranges wider
+        than 7 days with HTTP 400, so the default is already at the maximum.
         """
         await self.async_get_equipment()
 
         # Default to last 7 days up to the end of today (local time).
-        # The API interprets dates as the site's local timezone despite the Z suffix.
+        # The compact API interprets dates as the site's local timezone despite
+        # the Z suffix.
         now = datetime.now()
         if end_date is None:
             end_date = now.replace(hour=23, minute=59, second=59, microsecond=999999)
@@ -306,29 +324,73 @@ class SolarEdgeWeb:
             start_date,
             end_date,
         )
+
+        if _as_naive(end_date) - _as_naive(start_date) > _MAX_PLAYBACK_SPAN:
+            _LOGGER.warning(
+                "Requested range %s..%s is wider than the 7 days the API allows; expect HTTP 400",
+                start_date,
+                end_date,
+            )
+
+        resp_json = await self._async_fetch_playback(_PLAYBACK_COMPACT, start_date, end_date)
+        energy_data = _decode_playback(resp_json, start_date, self._site_structure)
+        if any(data.values for data in energy_data):
+            return energy_data
+
+        # The compact endpoint returns HTTP 200 with an empty payload on some
+        # sites. Without this fallback every slot would be silently zero.
+        # See https://github.com/Solarlibs/solaredge-web/issues/13
+        _LOGGER.warning(
+            "The compact playback endpoint returned no measurements for site %s. "
+            "Falling back to the verbose optimizers endpoint",
+            self.site_id,
+        )
+        return await self._async_get_energy_data_verbose(_as_naive(start_date), _as_naive(end_date))
+
+    async def _async_get_energy_data_verbose(self, start_date: datetime, end_date: datetime) -> list[EnergyData]:
+        """Fetch hourly energy data from the verbose playback endpoint.
+
+        The verbose endpoint reads the range as real UTC while the compact one
+        reads it as site-local, so the window has to be shifted by the site's
+        UTC offset. That offset is published nowhere in the layout, so it is
+        learned from the measurementTime of a first response and then cached;
+        re-reading it every time lets the cache self-correct across DST.
+        Widening the range instead is not an option: the API caps it at 7 days.
+        """
+        offset = self._site_utc_offset or timedelta(0)
+        resp_json = await self._async_fetch_playback(_PLAYBACK_VERBOSE, start_date - offset, end_date - offset)
+
+        observed = _extract_utc_offset(resp_json)
+        if observed is not None and observed != offset:
+            _LOGGER.debug("Site UTC offset is %s; re-requesting the shifted window", observed)
+            self._site_utc_offset = observed
+            resp_json = await self._async_fetch_playback(_PLAYBACK_VERBOSE, start_date - observed, end_date - observed)
+        elif observed is None:
+            _LOGGER.warning("Could not determine the site UTC offset for site %s", self.site_id)
+
+        return _decode_playback_verbose(resp_json, self._site_structure, start_date, end_date)
+
+    async def _async_fetch_playback(self, endpoint: str, start_date: datetime, end_date: datetime) -> dict[str, Any]:
+        """Fetch a playback response for the given endpoint and date range."""
         headers = dict(self._auth_headers)
         csrf_token_cookie = self._find_cookie("CSRF-TOKEN")
         if csrf_token_cookie and csrf_token_cookie.value:
             headers["X-CSRF-TOKEN"] = csrf_token_cookie.value
 
-        start_str = _to_utc_iso(start_date)
-        end_str = _to_utc_iso(end_date)
         url = (
-            f"https://monitoring.solaredge.com/services/layout/playback/site/{self.site_id}"
-            f"/optimizers-compact?resolution=hours"
-            f"&start-date={start_str}&end-date={end_str}"
+            f"{_PLAYBACK_BASE_URL}/{self.site_id}/{endpoint}"
+            f"?resolution=hours"
+            f"&start-date={_to_utc_iso(start_date)}&end-date={_to_utc_iso(end_date)}"
         )
-
         try:
             resp = await self.session.get(url, headers=headers, timeout=self.timeout)
             _LOGGER.debug("Got %s from %s", resp.status, url)
             resp.raise_for_status()
-            resp_json = await resp.json()
+            resp_json: dict[str, Any] = await resp.json()
         except aiohttp.ClientError:
             _LOGGER.exception("Error fetching energy data from %s", url)
             raise
-
-        return _decode_playback(resp_json, start_date, self._site_structure)
+        return resp_json
 
     def _find_cookie(self, name: str, host: str = _MONITORING_HOST) -> Morsel[str] | None:
         """Find a cookie by name that applies to the given host.
@@ -484,7 +546,6 @@ def _decode_playback(
 
     # Map each optimizer short serial to its parent names for aggregation.
     opt_to_parents = _build_opt_to_parent_map(site_structure)
-
     short_to_full = _collect_optimizer_serials(site_structure)
 
     # The API returns slots in the site's local timezone, not UTC, despite the
@@ -527,6 +588,78 @@ def _decode_playback(
 
     _LOGGER.debug("Decoded %s hourly slots for %s optimizers.", len(energy_data_list), len(serials))
     return energy_data_list
+
+
+def _extract_utc_offset(resp_json: dict[str, Any]) -> timedelta | None:
+    """Read the site's UTC offset from the first dated measurement, if any."""
+    for entry in resp_json.get("optimizerPowerMeasurementsList", []):
+        for measurement in entry.get("powerMeasurements", []):
+            raw_time = measurement.get("measurementTime")
+            if not raw_time:
+                continue
+            try:
+                parsed = datetime.fromisoformat(raw_time)
+            except (TypeError, ValueError):
+                continue
+            if parsed.tzinfo is not None:
+                return parsed.utcoffset()
+    return None
+
+
+def _decode_playback_verbose(
+    resp_json: dict[str, Any],
+    site_structure: dict[str, Any],
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+) -> list[EnergyData]:
+    """Decode the verbose playback response into an hourly EnergyData list.
+
+    Unlike the compact response, each measurement carries an explicit
+    ``measurementTime`` already offset to the site's local timezone, so slot
+    times are read from the payload instead of being derived from start_date.
+    Only slots with production are present, and results are filtered to
+    [start_date, end_date] when given.
+    """
+    measurements_list: list[dict[str, Any]] = list(resp_json.get("optimizerPowerMeasurementsList", []))
+    if not measurements_list:
+        _LOGGER.warning("No data returned in verbose playback response.")
+        return []
+
+    opt_to_parents = _build_opt_to_parent_map(site_structure)
+    short_to_full = _collect_optimizer_serials(site_structure)
+    window_start = _as_naive(start_date) if start_date else None
+    window_end = _as_naive(end_date) if end_date else None
+
+    slots: dict[datetime, dict[str, float]] = {}
+    for entry in measurements_list:
+        short_serial = (entry.get("serial") or "").split("-")[0]
+        if not short_serial:
+            continue
+        full_serial = short_to_full.get(short_serial, short_serial)
+        parents = opt_to_parents.get(short_serial, [])
+
+        for measurement in entry.get("powerMeasurements", []):
+            raw_time = measurement.get("measurementTime")
+            if not raw_time:
+                continue
+            try:
+                # The offset is the site's, so dropping it yields site-local time.
+                slot_time = _as_naive(datetime.fromisoformat(raw_time))
+                power_w = float(measurement.get("powerW"))
+            except (TypeError, ValueError):
+                continue
+            if power_w <= 0:
+                continue
+            if (window_start and slot_time < window_start) or (window_end and slot_time > window_end):
+                continue
+
+            values = slots.setdefault(slot_time, {})
+            _add_value(values, full_serial, power_w)
+            for parent_name in parents:
+                _add_value(values, parent_name, power_w)
+
+    _LOGGER.debug("Decoded %s hourly slots for %s optimizers (verbose).", len(slots), len(measurements_list))
+    return [EnergyData(start_time=slot_time, values=slots[slot_time]) for slot_time in sorted(slots)]
 
 
 __all__ = [
