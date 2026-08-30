@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from http.cookies import Morsel
 from pathlib import Path
@@ -456,3 +457,40 @@ async def test_login_is_reused_and_cache_survives(caplog):
     # One layout fetch, no OAuth traffic, cache intact across the extra login.
     assert session.get.await_count == 1
     session.post.assert_not_awaited()
+
+
+def test_decode_playback_header_only_returns_empty(caplog):
+    """A header-only compressPowerData warns instead of yielding silent zeros.
+
+    See https://github.com/Solarlibs/solaredge-web/issues/13
+    """
+    start = datetime(2026, 7, 30, 0, 0, 0, tzinfo=timezone.utc)
+    resp = {
+        "timeSlotsCount": 48,
+        "optimizerSerials": [f"7A01234{i}" for i in range(10)],
+        "compressPowerData": [2.0, 2.0],
+    }
+    with caplog.at_level(logging.WARNING):
+        assert _decode_playback(resp, start, {}) == []
+    assert "no measurements" in caplog.text
+
+
+def test_decode_playback_malformed_header_returns_empty():
+    """Truncated or non-numeric headers return [] instead of raising."""
+    start = datetime(2026, 7, 30, 0, 0, 0, tzinfo=timezone.utc)
+    # Only the version entry, no data_start_idx.
+    assert _decode_playback({"timeSlotsCount": 4, "optimizerSerials": ["X"], "compressPowerData": [2.0]}, start, {}) == []
+    # Non-numeric header.
+    assert (
+        _decode_playback(
+            {"timeSlotsCount": 4, "optimizerSerials": ["X"], "compressPowerData": [2.0, "nope", 0.0, 0.0, 1.0]},
+            start,
+            {},
+        )
+        == []
+    )
+    # Non-numeric timeSlotsCount.
+    assert (
+        _decode_playback({"timeSlotsCount": "many", "optimizerSerials": ["X"], "compressPowerData": [2.0, 4.0]}, start, {})
+        == []
+    )

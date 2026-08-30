@@ -414,6 +414,28 @@ def _build_opt_to_parent_map(
     return result
 
 
+def _collect_optimizer_serials(site_structure: dict[str, Any]) -> dict[str, str]:
+    """Map optimizer short serials to full serials using the site structure."""
+    short_to_full: dict[str, str] = {}
+
+    def collect(node: dict[str, Any]) -> None:
+        if node.get("type") == "OPTIMIZER":
+            full_serial = node.get("serial", "")
+            if full_serial:
+                short_to_full[full_serial.split("-")[0]] = full_serial
+        for child in node.get("children", []):
+            collect(child)
+
+    if site_structure:
+        collect(site_structure)
+    return short_to_full
+
+
+def _add_value(values: dict[str, float], key: str, power_w: float) -> None:
+    """Accumulate a power value under the given key."""
+    values[key] = values.get(key, 0.0) + power_w
+
+
 def _decode_playback(
     resp_json: dict[str, Any],
     start_date: datetime,
@@ -429,32 +451,41 @@ def _decode_playback(
     In addition to per-optimizer values, string/inverter/site values are
     aggregated by summing child optimizer values using the site layout.
     """
-    time_slots = int(resp_json.get("timeSlotsCount", 0))
     serials: list[str] = list(resp_json.get("optimizerSerials", []))
     compress_power: list[Any] = list(resp_json.get("compressPowerData", []))
+    try:
+        time_slots = int(resp_json.get("timeSlotsCount", 0))
+    except (TypeError, ValueError):
+        _LOGGER.warning("Invalid timeSlotsCount in playback response: %r", resp_json.get("timeSlotsCount"))
+        return []
 
     if not compress_power or time_slots == 0 or not serials:
         _LOGGER.warning("No data returned or empty arrays in playback response.")
         return []
 
-    data_start_idx = int(compress_power[1])
+    # Header is [version, data_start_idx] followed by a [meta, offset] pair per
+    # optimizer. Anything shorter carries no measurements at all, which some
+    # sites return with HTTP 200. Reporting it beats emitting silent zeros.
+    header_len = 2 + 2 * len(serials)
+    if len(compress_power) <= header_len:
+        _LOGGER.warning(
+            "Playback response contains no measurements: compressPowerData has %s entries but %s optimizers need more than %s",
+            len(compress_power),
+            len(serials),
+            header_len,
+        )
+        return []
+
+    try:
+        data_start_idx = int(compress_power[1])
+    except (TypeError, ValueError):
+        _LOGGER.warning("Invalid compressPowerData header: %r", compress_power[:2])
+        return []
 
     # Map each optimizer short serial to its parent names for aggregation.
     opt_to_parents = _build_opt_to_parent_map(site_structure)
 
-    # Map short serials to full serials using the site structure.
-    short_to_full: dict[str, str] = {}
-
-    def collect_serials(node: dict[str, Any]) -> None:
-        if node.get("type") == "OPTIMIZER":
-            full_serial = node.get("serial", "")
-            if full_serial:
-                short_to_full[full_serial.split("-")[0]] = full_serial
-        for child in node.get("children", []):
-            collect_serials(child)
-
-    if site_structure:
-        collect_serials(site_structure)
+    short_to_full = _collect_optimizer_serials(site_structure)
 
     # The API returns slots in the site's local timezone, not UTC, despite the
     # Z suffix in the request. We label slots with start_date as-is so callers
@@ -486,12 +517,11 @@ def _decode_playback(
                 continue
 
             # Per-optimizer value keyed by full serial (matching equipment dict).
-            full_serial = short_to_full.get(short_serial, short_serial)
-            values[full_serial] = values.get(full_serial, 0.0) + power_w
+            _add_value(values, short_to_full.get(short_serial, short_serial), power_w)
 
             # Aggregate into parent string, inverter, and site.
             for parent_name in opt_to_parents.get(short_serial, []):
-                values[parent_name] = values.get(parent_name, 0.0) + power_w
+                _add_value(values, parent_name, power_w)
 
         energy_data_list.append(EnergyData(start_time=slot_time, values=values))
 
