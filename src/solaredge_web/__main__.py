@@ -4,6 +4,10 @@ Run with::
 
     python -m solaredge_web -u <email> -p <password> -s <site_id> [-v]
 
+Credentials may also come from a ``.env`` file in the working directory or from
+the SOLAREDGE_USERNAME / SOLAREDGE_PASSWORD / SOLAREDGE_SITE_ID environment
+variables, so they need not be passed on the command line.
+
 It will:
 1. Authenticate via the OAuth2 PKCE flow.
 2. Fetch the equipment layout (inverters, strings, optimizers).
@@ -17,7 +21,9 @@ import argparse
 import asyncio
 import getpass
 import logging
+import os
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -26,9 +32,13 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 try:
-    from .solaredge import EnergyData, SolarEdgeWeb
+    from .solaredge import EnergyData, SolarEdgeWeb, _device_id
 except ImportError:
-    from solaredge import EnergyData, SolarEdgeWeb  # type: ignore[no-redef,import-not-found]
+    from solaredge import (  # type: ignore[no-redef,import-not-found]
+        EnergyData,
+        SolarEdgeWeb,
+        _device_id,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,11 +51,33 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _load_dotenv(path: Path = Path(".env")) -> dict[str, str]:
+    """Read simple KEY=VALUE lines from a .env file, if one exists."""
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip().strip("\"'")
+    return values
+
+
 def _get_credentials(args: argparse.Namespace) -> tuple[str, str, str]:
-    """Prompt for missing credentials."""
-    username = args.username or input("SolarEdge Username: ").strip()
-    password = args.password or getpass.getpass("SolarEdge Password: ").strip()
-    site_id = args.site_id or input("SolarEdge Site ID: ").strip()
+    """Resolve credentials from CLI args, then .env, then environment, then prompt."""
+    dotenv = _load_dotenv()
+
+    def resolve(arg: str | None, key: str, prompt: str, secret: bool = False) -> str:
+        value = arg or dotenv.get(key) or os.environ.get(key)
+        if value:
+            return value.strip()
+        return (getpass.getpass(prompt) if secret else input(prompt)).strip()
+
+    username = resolve(args.username, "SOLAREDGE_USERNAME", "SolarEdge Username: ")
+    password = resolve(args.password, "SOLAREDGE_PASSWORD", "SolarEdge Password: ", secret=True)
+    site_id = resolve(args.site_id, "SOLAREDGE_SITE_ID", "SolarEdge Site ID: ")
     return username, password, site_id
 
 
@@ -117,12 +149,7 @@ async def async_main() -> None:
                 first_optimizer = next(eq_id for eq_id, data in equipment.items() if data.get("type") == "OPTIMIZER")
                 # Site aggregation is keyed by the site's device_id (identifier/uuid).
                 site_node = client._site_structure
-                site_key = (
-                    site_node.get("serial")
-                    or site_node.get("properties", {}).get("identifier")
-                    or site_node.get("uuid")
-                    or site_id
-                )
+                site_key = _device_id(site_node) or site_id
                 site_name = site_node.get("name", site_id)
 
                 _print_data(energy_data, first_optimizer, site_name, site_key)
