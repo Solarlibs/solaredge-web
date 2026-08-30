@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
+import pytest
 
 from solaredge_web import SolarEdgeWeb
 from solaredge_web.solaredge import _build_opt_to_parent_map, _decode_playback, _to_utc_iso
@@ -38,6 +39,7 @@ def _mock_response(
     resp.raise_for_status = MagicMock()
     resp.json = AsyncMock(return_value=json_data if json_data is not None else {})
     resp.text = AsyncMock(return_value=text)
+    resp.read = AsyncMock(return_value=text.encode())
     return resp
 
 
@@ -172,10 +174,10 @@ async def test_async_get_equipment_parses_v2_site_structure():
 async def test_async_get_equipment_caches_result():
     """Second call returns cached equipment without hitting the API."""
     equipment_json = _load_fixture("equipment.json")
-    sso_cookie = _make_cookie("SolarEdge_SSO-1.4", "sso_value")
+    session_cookie = _make_cookie("se_monitoring_auth", "session_value")
 
     equipment_resp = _mock_response(json_data=equipment_json)
-    session = _make_mock_session(cookies=[sso_cookie])
+    session = _make_mock_session(cookies=[session_cookie])
     session.get = AsyncMock(side_effect=[equipment_resp])
 
     client = SolarEdgeWeb("u", "p", "123", session, timeout=5)
@@ -188,13 +190,13 @@ async def test_async_get_equipment_caches_result():
     assert session.get.await_count == 1
 
 
-async def test_async_get_equipment_skips_login_with_valid_sso():
-    """Login is skipped when a valid SSO cookie + auth headers exist."""
+async def test_async_get_equipment_skips_login_with_valid_session():
+    """Login is skipped when a valid session cookie + auth headers exist."""
     equipment_json = _load_fixture("equipment.json")
-    sso_cookie = _make_cookie("SolarEdge_SSO-1.4", "sso_value")
+    session_cookie = _make_cookie("se_monitoring_auth", "session_value")
 
     equipment_resp = _mock_response(json_data=equipment_json)
-    session = _make_mock_session(cookies=[sso_cookie])
+    session = _make_mock_session(cookies=[session_cookie])
     session.get = AsyncMock(side_effect=[equipment_resp])
     session.post = AsyncMock()
 
@@ -210,10 +212,10 @@ async def test_async_get_equipment_skips_login_with_valid_sso():
 async def test_async_get_equipment_excludes_inactive_by_default():
     """Retired optimizers (INACTIVE) are excluded by default, incl. from cache."""
     equipment_json = _load_fixture("equipment_with_inactive.json")
-    sso_cookie = _make_cookie("SolarEdge_SSO-1.4", "sso_value")
+    session_cookie = _make_cookie("se_monitoring_auth", "session_value")
 
     equipment_resp = _mock_response(json_data=equipment_json)
-    session = _make_mock_session(cookies=[sso_cookie])
+    session = _make_mock_session(cookies=[session_cookie])
     session.get = AsyncMock(side_effect=[equipment_resp])
     session.post = AsyncMock()
 
@@ -240,10 +242,10 @@ async def test_async_get_equipment_excludes_inactive_by_default():
 async def test_async_get_equipment_include_inactive_returns_all():
     """include_inactive=True keeps retired units."""
     equipment_json = _load_fixture("equipment_with_inactive.json")
-    sso_cookie = _make_cookie("SolarEdge_SSO-1.4", "sso_value")
+    session_cookie = _make_cookie("se_monitoring_auth", "session_value")
 
     equipment_resp = _mock_response(json_data=equipment_json)
-    session = _make_mock_session(cookies=[sso_cookie])
+    session = _make_mock_session(cookies=[session_cookie])
     session.get = AsyncMock(side_effect=[equipment_resp])
     session.post = AsyncMock()
 
@@ -261,8 +263,8 @@ async def test_async_get_energy_data_includes_aggregations():
     playback_json = _load_fixture("playback.json")
     equipment_json = _load_fixture("equipment.json")
 
-    sso_cookie = _make_cookie("SolarEdge_SSO-1.4", "sso_value")
-    session = _make_mock_session(cookies=[sso_cookie])
+    session_cookie = _make_cookie("se_monitoring_auth", "session_value")
+    session = _make_mock_session(cookies=[session_cookie])
 
     equipment_resp = _mock_response(json_data=equipment_json)
     playback_resp = _mock_response(json_data=playback_json)
@@ -290,8 +292,8 @@ async def test_async_get_energy_data_uses_correct_url():
     playback_json = _load_fixture("playback.json")
     equipment_json = _load_fixture("equipment.json")
 
-    sso_cookie = _make_cookie("SolarEdge_SSO-1.4", "sso_value")
-    session = _make_mock_session(cookies=[sso_cookie])
+    session_cookie = _make_cookie("se_monitoring_auth", "session_value")
+    session = _make_mock_session(cookies=[session_cookie])
 
     equipment_resp = _mock_response(json_data=equipment_json)
     playback_resp = _mock_response(json_data=playback_json)
@@ -318,9 +320,9 @@ async def test_async_get_energy_data_sends_auth_and_csrf_headers():
     playback_json = _load_fixture("playback.json")
     equipment_json = _load_fixture("equipment.json")
 
-    sso_cookie = _make_cookie("SolarEdge_SSO-1.4", "sso_value")
+    session_cookie = _make_cookie("se_monitoring_auth", "session_value")
     csrf_cookie = _make_cookie("CSRF-TOKEN", "csrf-value-123")
-    session = _make_mock_session(cookies=[sso_cookie, csrf_cookie])
+    session = _make_mock_session(cookies=[session_cookie, csrf_cookie])
 
     equipment_resp = _mock_response(json_data=equipment_json)
     playback_resp = _mock_response(json_data=playback_json)
@@ -343,8 +345,8 @@ async def test_async_get_energy_data_sends_auth_and_csrf_headers():
 async def test_async_get_energy_data_empty_response():
     """Empty playback response returns an empty list."""
     equipment_json = _load_fixture("equipment.json")
-    sso_cookie = _make_cookie("SolarEdge_SSO-1.4", "sso_value")
-    session = _make_mock_session(cookies=[sso_cookie])
+    session_cookie = _make_cookie("se_monitoring_auth", "session_value")
+    session = _make_mock_session(cookies=[session_cookie])
 
     equipment_resp = _mock_response(json_data=equipment_json)
     empty_resp = _mock_response(json_data={"timeSlotsCount": 0, "optimizerSerials": [], "compressPowerData": []})
@@ -358,3 +360,53 @@ async def test_async_get_energy_data_empty_response():
     end = datetime(2026, 7, 30, 4, 0, 0, tzinfo=timezone.utc)
     result = await client.async_get_energy_data(start, end)
     assert result == []
+
+
+async def test_async_get_equipment_http_error():
+    """A non-200 from the layout endpoint propagates as ClientResponseError."""
+    session_cookie = _make_cookie("se_monitoring_auth", "session_value")
+    session = _make_mock_session(cookies=[session_cookie])
+    session.get = AsyncMock(side_effect=[_mock_failing_response(404)])
+
+    client = SolarEdgeWeb("u", "p", "123", session, timeout=5)
+    client._last_login_time = 1e12
+    client._auth_headers = {"Authorization": "Bearer test"}
+
+    with pytest.raises(aiohttp.ClientResponseError):
+        await client.async_get_equipment()
+
+
+def test_find_cookie_matches_parent_domain():
+    """A cookie scoped to solaredge.com is found for monitoring.solaredge.com."""
+    session = _make_mock_session(
+        cookies=[
+            _make_cookie("se_monitoring_auth", "v", domain="solaredge.com"),
+            _make_cookie("other", "v", domain="login.solaredge.com"),
+        ]
+    )
+    client = SolarEdgeWeb("u", "p", "123", session, timeout=5)
+
+    assert client._find_cookie("se_monitoring_auth") is not None
+    # A cookie on a sibling host must not match.
+    assert client._find_cookie("other") is None
+
+
+async def test_login_is_reused_and_cache_survives(caplog):
+    """A valid session cookie skips the OAuth flow and keeps the equipment cache."""
+    equipment_json = _load_fixture("equipment.json")
+    session_cookie = _make_cookie("se_monitoring_auth", "session_value")
+    session = _make_mock_session(cookies=[session_cookie])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=equipment_json)])
+    session.post = AsyncMock()
+
+    client = SolarEdgeWeb("u", "p", "123", session, timeout=5)
+    client._last_login_time = 1e12
+    client._auth_headers = {"Authorization": "Bearer test"}
+
+    await client.async_get_equipment()
+    await client.async_login()
+    await client.async_get_equipment()
+
+    # One layout fetch, no OAuth traffic, cache intact across the extra login.
+    assert session.get.await_count == 1
+    session.post.assert_not_awaited()

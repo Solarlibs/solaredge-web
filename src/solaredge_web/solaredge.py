@@ -29,6 +29,11 @@ _OAUTH_AUTHORIZE_URL = "https://login.solaredge.com/oauth2/authorize"
 _OAUTH_TOKEN_URL = "https://login.solaredge.com/oauth2/token"  # noqa: S105
 _AUTH_EXCHANGE_URL = "https://monitoring.solaredge.com/services/auth/token?legacy=false"
 
+_MONITORING_HOST = "monitoring.solaredge.com"
+# Cookie set by the monitoring backend once the OAuth token exchange succeeds.
+# Its presence means the session is still usable and login can be skipped.
+_SESSION_COOKIE_NAME = "se_monitoring_auth"
+
 # Refresh SSO session at most every hour to avoid re-issuing the OAuth flow.
 _LOGIN_REFRESH_SECONDS = 3600
 
@@ -74,15 +79,17 @@ class SolarEdgeWeb:
         self._auth_headers: dict[str, str] = {}
 
     async def async_login(self) -> None:
-        """Login via OAuth2 PKCE. Reuses SSO cookie for 1 hour."""
-        sso_cookie = self._find_cookie("SolarEdge_SSO-1.4")
-        if sso_cookie is not None and self._auth_headers and (time.time() - self._last_login_time < _LOGIN_REFRESH_SECONDS):
-            _LOGGER.debug("Skipping login. Reusing SSO cookie and auth headers.")
+        """Login via OAuth2 PKCE. Reuses the monitoring session for 1 hour."""
+        session_cookie = self._find_cookie(_SESSION_COOKIE_NAME)
+        if (
+            session_cookie is not None
+            and self._auth_headers
+            and (time.time() - self._last_login_time < _LOGIN_REFRESH_SECONDS)
+        ):
+            _LOGGER.debug("Skipping login. Reusing monitoring session and auth headers.")
             return
 
         _LOGGER.debug("Starting OAuth2 login flow...")
-        self._equipment = {}
-        self._site_structure = {}
 
         try:
             verifier_bytes = os.urandom(32)
@@ -100,6 +107,9 @@ class SolarEdgeWeb:
             )
 
             resp = await self.session.get(auth_url, timeout=self.timeout)
+            # Drain the body so the connection returns to the pool even when the
+            # authorization code is already present in the redirect history.
+            await resp.read()
             code = self._extract_code_from_history(resp)
 
             if not code:
@@ -122,23 +132,29 @@ class SolarEdgeWeb:
             resp.raise_for_status()
             oauth_tokens = await resp.json()
 
-            self._auth_headers = {"Authorization": f"Bearer {oauth_tokens['access_token']}"}
+            auth_headers = {"Authorization": f"Bearer {oauth_tokens['access_token']}"}
 
             # Establish the backend monitoring session.
             resp = await self.session.post(
                 _AUTH_EXCHANGE_URL,
                 json=oauth_tokens,
-                headers=self._auth_headers,
+                headers=auth_headers,
                 timeout=self.timeout,
             )
             resp.raise_for_status()
-
-            self._last_login_time = time.time()
-            _LOGGER.debug("Successfully completed OAuth2 login flow.")
+            await resp.read()
 
         except aiohttp.ClientError:
             _LOGGER.exception("Error during SolarEdge login")
             raise
+
+        # Only invalidate the cached layout once the new session is established,
+        # so a failed login does not throw away a still-usable cache.
+        self._auth_headers = auth_headers
+        self._equipment = {}
+        self._site_structure = {}
+        self._last_login_time = time.time()
+        _LOGGER.debug("Successfully completed OAuth2 login flow.")
 
     async def _submit_login_form(self, resp: aiohttp.ClientResponse) -> str | None:
         """Parse the login form and submit credentials. Returns the OAuth code."""
@@ -166,11 +182,12 @@ class SolarEdgeWeb:
 
         _LOGGER.debug("Submitting login form to %s", action)
         resp = await self.session.post(action, data=form_data, timeout=self.timeout)
+        await resp.read()
         return self._extract_code_from_history(resp)
 
     def _extract_code_from_history(self, resp: aiohttp.ClientResponse) -> str | None:
         """Scan redirect history for the OAuth authorization code."""
-        for r in [*list(resp.history), resp]:
+        for r in [*resp.history, resp]:
             parsed = urlparse(str(r.url))
             if "callback" in parsed.path:
                 qs = parse_qs(parsed.query)
@@ -242,7 +259,6 @@ class SolarEdgeWeb:
         If start_date/end_date are not provided, defaults to the last 7 days
         up to the end of today (in local time).
         """
-        await self.async_login()
         await self.async_get_equipment()
 
         # Default to last 7 days up to the end of today (local time).
@@ -283,12 +299,24 @@ class SolarEdgeWeb:
 
         return _decode_playback(resp_json, start_date, self._site_structure)
 
-    def _find_cookie(self, name: str) -> Morsel[str] | None:
-        """Find a cookie by name on the monitoring domain."""
+    def _find_cookie(self, name: str, host: str = _MONITORING_HOST) -> Morsel[str] | None:
+        """Find a cookie by name that applies to the given host.
+
+        Matches parent domains too, so a cookie scoped to ``solaredge.com``
+        is still found for ``monitoring.solaredge.com``.
+        """
         for cookie in self.session.cookie_jar:
-            if cookie["domain"] == "monitoring.solaredge.com" and cookie.key == name:
+            if cookie.key != name:
+                continue
+            domain = cookie["domain"]
+            if domain == host or host.endswith(f".{domain}"):
                 return cookie
         return None
+
+
+def _as_naive(dt: datetime) -> datetime:
+    """Drop tzinfo, keeping the wall-clock time."""
+    return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
 
 
 def _to_utc_iso(dt: datetime) -> str:
