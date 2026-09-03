@@ -16,6 +16,7 @@ from solaredge_web import SolarEdgeWeb
 from solaredge_web.solaredge import (
     _build_opt_to_parent_map,
     _decode_dashboard_measurements,
+    _decode_energy_totals,
     _decode_playback,
     _decode_playback_verbose,
     _to_utc_iso,
@@ -964,3 +965,105 @@ def test_decode_dashboard_measurements_skips_invalid_entries():
     assert data[0].production is None
     assert data[0].consumption == 20.0
     assert data[1].production == 30.0
+
+
+async def test_async_get_energy_totals_keys_match_equipment():
+    """Totals are keyed by the same device ids async_get_equipment returns."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("equipment.json")),
+            _mock_response(json_data=_load_fixture("layout_energy_by_inverter.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    totals = await client.async_get_energy_totals(datetime(2026, 7, 30), datetime(2026, 7, 30))
+
+    assert totals["7A012345-CA"] == 1596.25
+    assert totals["7A012346-CA"] == 1422.25
+    assert totals["7E012345_31"] == 23935.75
+    assert totals["7E012345-57"] == 41821.0
+    # The site total is the sum of the inverters; the response has no site entry.
+    assert totals["TESTSITE01"] == 41821.0
+    assert set(totals) <= set(await client.async_get_equipment()) | {"TESTSITE01"}
+
+
+async def test_async_get_energy_totals_url():
+    """The by-inverter URL carries plain dates and one serial per inverter."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("equipment.json")),
+            _mock_response(json_data=_load_fixture("layout_energy_by_inverter.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    await client.async_get_energy_totals(datetime(2026, 7, 30), datetime(2026, 7, 30))
+
+    url = session.get.await_args_list[1].args[0]
+    assert "services/layout/energy/site/123/by-inverter" in url
+    assert "start-date=2026-07-30" in url
+    assert "end-date=2026-07-30" in url
+    assert "inverter-serials=7E012345-57" in url
+    assert "include-color=true" in url
+
+
+async def test_async_get_energy_totals_defaults_to_today():
+    """Without dates the range is today only."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("equipment.json")),
+            _mock_response(json_data=_load_fixture("layout_energy_by_inverter.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    await client.async_get_energy_totals()
+
+    url = session.get.await_args_list[1].args[0]
+    today = datetime.now().date()
+    assert f"start-date={today}" in url
+    assert f"end-date={today}" in url
+
+
+def test_decode_energy_totals_converts_units():
+    """Energy reported in kWh is converted to Wh."""
+    resp = {
+        "inverters": [
+            {
+                "serial": "7E012345-57",
+                "energy": {"value": 41.821, "unit": "kilo-watt-hour"},
+                "strings": [{"energy": {"value": 23.93575, "unit": "kilo-watt-hour"}, "stringRelativeOrder": 1}],
+                "optimizers": [{"serial": "7A012345-CA", "energy": {"value": 1.59625, "unit": "kilo-watt-hour"}}],
+            }
+        ]
+    }
+
+    totals = _decode_energy_totals(resp, _load_fixture("equipment.json")["siteStructure"])
+
+    assert totals["7E012345-57"] == pytest.approx(41821.0)
+    assert totals["7E012345_31"] == pytest.approx(23935.75)
+    assert totals["7A012345-CA"] == pytest.approx(1596.25)
+
+
+def test_decode_energy_totals_empty(caplog):
+    """A response with no inverters returns an empty dict and warns."""
+    with caplog.at_level(logging.WARNING):
+        assert _decode_energy_totals({"inverters": []}, {}) == {}
+    assert "No inverters returned" in caplog.text
+
+
+async def test_async_get_energy_totals_without_inverters(caplog):
+    """A layout with no inverters short-circuits without a request."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data={"siteStructure": {"type": "SITE"}})])
+
+    client = _logged_in_client(session)
+    with caplog.at_level(logging.WARNING):
+        assert await client.async_get_energy_totals() == {}
+
+    assert session.get.await_count == 1
+    assert "No inverters found" in caplog.text

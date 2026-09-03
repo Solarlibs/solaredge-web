@@ -56,6 +56,12 @@ _MAX_PLAYBACK_SPAN = timedelta(days=8)
 # Site-level production/consumption. The power endpoint answers in watts and
 # serves sub-daily slots; the energy endpoint answers in watt-hours and serves
 # daily and coarser slots. They share the same measurement shape.
+# Measured energy per optimizer/string/inverter over a date range.
+_BY_INVERTER_URL = f"{_LAYOUT_BASE_URL}/energy/site"
+
+# Units the by-inverter endpoint reports energy in, as a factor to Wh.
+_ENERGY_UNIT_TO_WH = {"watt-hour": 1.0, "kilo-watt-hour": 1000.0, "mega-watt-hour": 1000000.0}
+
 _SITE_POWER_URL = f"{_DASHBOARD_BASE_URL}/power/sites"
 _SITE_ENERGY_URL = f"{_DASHBOARD_BASE_URL}/energy/sites"
 
@@ -526,6 +532,47 @@ class SolarEdgeWeb:
             scale = 1.0
         return _decode_dashboard_measurements(measurements, scale)
 
+    async def async_get_energy_totals(
+        self,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> dict[str, float]:
+        """Get total energy per equipment over a date range. Values are in Wh.
+
+        Keyed like :attr:`EnergyData.values`, so per-optimizer, per-string,
+        per-inverter and site totals can be looked up with the same ids
+        :meth:`async_get_equipment` returns.
+
+        Unlike :meth:`async_get_energy_data`, which sums hourly playback power
+        and therefore approximates, these are the energy figures the API
+        itself reports, with an explicit unit. There is no time series: the
+        result is one total per device for the whole range.
+
+        If start_date/end_date are not provided, defaults to today.
+        """
+        await self.async_get_equipment()
+
+        end = (_as_naive(end_date) if end_date else datetime.now()).date()
+        start = _as_naive(start_date).date() if start_date else end
+
+        inverter_serials = _collect_inverter_serials(self._site_structure)
+        if not inverter_serials:
+            _LOGGER.warning("No inverters found in the layout for site %s", self.site_id)
+            return {}
+
+        params = [
+            ("start-date", start.isoformat()),
+            ("end-date", end.isoformat()),
+            *[("inverter-serials", serial) for serial in inverter_serials],
+            ("include-max-temperature", "false"),
+            ("include-color", "true"),
+        ]
+        url = f"{_BY_INVERTER_URL}/{self.site_id}/by-inverter?{urlencode(params)}"
+
+        _LOGGER.debug("Fetching energy totals for site: %s (%s..%s)", self.site_id, start, end)
+        resp_json = await self._async_get_json(url, "energy totals")
+        return _decode_energy_totals(resp_json, self._site_structure)
+
     async def _async_get_json(self, url: str, description: str) -> dict[str, Any]:
         """GET a monitoring API endpoint and return the decoded JSON body.
 
@@ -813,6 +860,112 @@ def _decode_dashboard_measurements(measurements: list[dict[str, Any]], scale: fl
 
     _LOGGER.debug("Decoded %s dashboard measurements.", len(result))
     return result
+
+
+def _collect_inverter_serials(site_structure: dict[str, Any]) -> list[str]:
+    """List the serials of every inverter in the layout, in document order."""
+    serials: list[str] = []
+
+    def collect(node: dict[str, Any]) -> None:
+        if node.get("type") == "INVERTER":
+            serial = node.get("serial")
+            if serial:
+                serials.append(serial)
+        for child in node.get("children", []):
+            collect(child)
+
+    if site_structure:
+        collect(site_structure)
+    return serials
+
+
+def _build_string_id_map(site_structure: dict[str, Any]) -> dict[tuple[str, int], str]:
+    """Map (inverter serial, string order) to the string's device id.
+
+    The by-inverter response identifies strings only by ``stringRelativeOrder``,
+    a 1-based position within their inverter, so they have to be matched back
+    to the layout by position.
+    """
+    result: dict[tuple[str, int], str] = {}
+
+    def walk(node: dict[str, Any], inverter_serial: str | None, counter: list[int]) -> None:
+        node_type = node.get("type")
+        if node_type == "INVERTER":
+            inverter_serial = node.get("serial")
+            counter = [0]
+        if node_type == "STRING" and inverter_serial:
+            counter[0] += 1
+            order = node.get("order")
+            try:
+                relative_order = int(order) if order is not None else counter[0]
+            except (TypeError, ValueError):
+                relative_order = counter[0]
+            device_id = _device_id(node)
+            if device_id:
+                result[(inverter_serial, relative_order)] = device_id
+        for child in node.get("children", []):
+            walk(child, inverter_serial, counter)
+
+    if site_structure:
+        walk(site_structure, None, [0])
+    return result
+
+
+def _energy_wh(energy: Any) -> float | None:
+    """Read an ``{"value": .., "unit": ..}`` object as watt-hours."""
+    if not isinstance(energy, dict):
+        return None
+    value = _as_float(energy.get("value"))
+    if value is None:
+        return None
+    unit = str(energy.get("unit") or "watt-hour").lower()
+    factor = _ENERGY_UNIT_TO_WH.get(unit)
+    if factor is None:
+        _LOGGER.warning("Unknown energy unit %r; assuming watt-hour", unit)
+        factor = 1.0
+    return value * factor
+
+
+def _decode_energy_totals(resp_json: dict[str, Any], site_structure: dict[str, Any]) -> dict[str, float]:
+    """Decode a by-inverter response into energy totals keyed by device id.
+
+    The site total is the sum of its inverters; the response has no site entry.
+    """
+    inverters = resp_json.get("inverters", [])
+    if not inverters:
+        _LOGGER.warning("No inverters returned in the by-inverter energy response.")
+        return {}
+
+    string_ids = _build_string_id_map(site_structure)
+    site_key = _device_id(site_structure) if site_structure else None
+
+    totals: dict[str, float] = {}
+    for inverter in inverters:
+        serial = inverter.get("serial")
+        energy = _energy_wh(inverter.get("energy"))
+        if serial and energy is not None:
+            _add_value(totals, serial, energy)
+            if site_key:
+                _add_value(totals, site_key, energy)
+
+        for position, string in enumerate(inverter.get("strings", []), start=1):
+            order = string.get("stringRelativeOrder", position)
+            energy = _energy_wh(string.get("energy"))
+            try:
+                string_key = string_ids.get((serial, int(order)))
+            except (TypeError, ValueError):
+                string_key = None
+            if string_key and energy is not None:
+                _add_value(totals, string_key, energy)
+
+        for optimizer in inverter.get("optimizers", []):
+            optimizer_serial = optimizer.get("serial")
+            energy = _energy_wh(optimizer.get("energy"))
+            if optimizer_serial and energy is not None:
+                _add_value(totals, optimizer_serial, energy)
+
+    _LOGGER.debug("Decoded energy totals for %s devices.", len(totals))
+    return totals
 
 
 def _extract_utc_offset(resp_json: dict[str, Any]) -> timedelta | None:
