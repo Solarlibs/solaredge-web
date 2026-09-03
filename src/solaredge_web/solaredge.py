@@ -82,17 +82,13 @@ _POWER_FLOW_URL = f"{_DASHBOARD_BASE_URL}/power-flow/v2/sites"
 _SITE_POWER_URL = f"{_DASHBOARD_BASE_URL}/power/sites"
 _SITE_ENERGY_URL = f"{_DASHBOARD_BASE_URL}/energy/sites"
 
-# Accepted chart-time-unit values, mapped to the hours one slot covers.
-# Only the first two are valid for the power endpoint, only the rest for the
-# energy one; "hours" is rejected by the energy endpoint.
-_SLOT_HOURS = {
-    "quarter-hours": 0.25,
-    "hours": 1.0,
-    "days": 24.0,
-    "months": None,
-    "years": None,
-}
-_POWER_RESOLUTIONS = ("quarter-hours", "hours")
+# Sub-daily chart-time-unit values, mapped to the hours one slot covers, which
+# is what turns the watts the power endpoint answers with into Wh. The energy
+# endpoint serves the coarser units and answers in Wh already; it rejects
+# "hours", and the power endpoint rejects everything below.
+_POWER_SLOT_HOURS = {"quarter-hours": 0.25, "hours": 1.0}
+_ENERGY_RESOLUTIONS = ("days", "months", "years")
+_CONSUMPTION_RESOLUTIONS = (*_POWER_SLOT_HOURS, *_ENERGY_RESOLUTIONS)
 
 # Widest span each resolution accepts before answering BAD_ARGUMENTS. Measured
 # against the live API; months and years are far wider than anyone asks for.
@@ -531,8 +527,8 @@ class SolarEdgeWeb:
         Consumption, import and export are ``None`` unless the site has a
         consumption meter; see :meth:`async_get_site_components`.
         """
-        if resolution not in _SLOT_HOURS:
-            msg = f"Unsupported resolution {resolution!r}; expected one of {', '.join(_SLOT_HOURS)}"
+        if resolution not in _CONSUMPTION_RESOLUTIONS:
+            msg = f"Unsupported resolution {resolution!r}; expected one of {', '.join(_CONSUMPTION_RESOLUTIONS)}"
             raise ValueError(msg)
 
         components = await self.async_get_site_components()
@@ -550,7 +546,7 @@ class SolarEdgeWeb:
                 resolution,
             )
 
-        is_power = resolution in _POWER_RESOLUTIONS
+        is_power = resolution in _POWER_SLOT_HOURS
         base_url = _SITE_POWER_URL if is_power else _SITE_ENERGY_URL
         params = [
             ("chart-time-unit", resolution),
@@ -574,7 +570,7 @@ class SolarEdgeWeb:
         if is_power:
             measurements = resp_json.get("measurements", [])
             # Watts over a slot of known length; Wh = W * hours.
-            scale = _SLOT_HOURS[resolution] or 1.0
+            scale = _POWER_SLOT_HOURS[resolution]
         else:
             measurements = resp_json.get("chart", {}).get("measurements", [])
             scale = 1.0
