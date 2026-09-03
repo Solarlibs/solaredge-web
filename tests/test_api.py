@@ -16,6 +16,7 @@ from solaredge_web import SolarEdgeWeb
 from solaredge_web.solaredge import (
     _build_opt_to_parent_map,
     _decode_dashboard_measurements,
+    _decode_energy_graph,
     _decode_energy_totals,
     _decode_playback,
     _decode_playback_verbose,
@@ -1067,3 +1068,71 @@ async def test_async_get_energy_totals_without_inverters(caplog):
 
     assert session.get.await_count == 1
     assert "No inverters found" in caplog.text
+
+
+async def test_async_get_site_energy_hourly():
+    """Hourly site energy is returned in Wh with naive site-local times."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=_load_fixture("energy_graph_hours.json"))])
+
+    client = _logged_in_client(session)
+    data = await client.async_get_site_energy(datetime(2026, 7, 30), datetime(2026, 7, 30))
+
+    url = session.get.await_args_list[0].args[0]
+    assert "services/layout/energy-graph/site/123" in url
+    assert "chart-time-unit=hours" in url
+    assert "start-date=2026-07-30" in url
+    assert len(data) == 24
+    assert data[8].start_time == datetime(2026, 7, 30, 8, 0)
+    assert data[8].energy == 1223.0
+    # Slots the site has not reported yet stay None.
+    assert data[23].energy is None
+
+
+async def test_async_get_site_energy_defaults_per_resolution():
+    """Each resolution defaults to a range the API accepts."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=_load_fixture("energy_graph_hours.json"))] * 2)
+
+    client = _logged_in_client(session)
+    await client.async_get_site_energy()
+    await client.async_get_site_energy(resolution="days")
+
+    today = datetime.now().date()
+    hourly_url = session.get.await_args_list[0].args[0]
+    daily_url = session.get.await_args_list[1].args[0]
+    # "hours" only serves a single day.
+    assert f"start-date={today}" in hourly_url
+    assert f"end-date={today}" in hourly_url
+    assert f"start-date={today - timedelta(days=7)}" in daily_url
+
+
+async def test_async_get_site_energy_warns_on_too_wide_range(caplog):
+    """Hourly data spanning more than a day is flagged before the request."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=_load_fixture("energy_graph_hours.json"))])
+
+    client = _logged_in_client(session)
+    with caplog.at_level(logging.WARNING):
+        await client.async_get_site_energy(datetime(2026, 7, 24), datetime(2026, 7, 30))
+
+    assert "wider than the 0 days" in caplog.text
+
+
+async def test_async_get_site_energy_rejects_unknown_resolution():
+    """quarter-hours is not served by this endpoint."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock()
+
+    client = _logged_in_client(session)
+    with pytest.raises(ValueError, match="Unsupported resolution"):
+        await client.async_get_site_energy(resolution="quarter-hours")
+
+    session.get.assert_not_awaited()
+
+
+def test_decode_energy_graph_empty(caplog):
+    """A response with no bars returns an empty list and warns."""
+    with caplog.at_level(logging.WARNING):
+        assert _decode_energy_graph({"energyBars": []}) == []
+    assert "No energy bars returned" in caplog.text
