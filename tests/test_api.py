@@ -1179,3 +1179,40 @@ async def test_async_get_live_power_tolerates_missing_fields():
     assert live.is_communicating is None
     assert live.last_update_time is None
     assert live.power_flow == {"lastUpdateTime": "not-a-time"}
+
+
+async def test_async_get_site_information_is_cached():
+    """Site information is fetched once and reused, and carries the timezone."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=_load_fixture("site_information.json"))])
+
+    client = _logged_in_client(session)
+    info = await client.async_get_site_information()
+    await client.async_get_site_information()
+
+    assert info["siteTimeZone"] == "America/Los_Angeles"
+    assert info["peakPower"] == 10.53
+    assert session.get.await_count == 1
+    assert session.get.await_args_list[0].args[0].endswith("services/layout/information/site/123")
+
+
+async def test_async_get_site_information_cache_cleared_by_login():
+    """A fresh login drops the cached site information."""
+    info = _load_fixture("site_information.json")
+    auth_resp = _mock_response(url="https://monitoring.solaredge.com/mfe/auth/callback?code=test_code")
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=info), auth_resp, _mock_response(json_data=info)])
+    session.post = AsyncMock(
+        side_effect=[
+            _mock_response(json_data={"access_token": "test_token"}),
+            _mock_response(json_data={"ok": True}),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    await client.async_get_site_information()
+    client._last_login_time = 0.0
+    client._auth_headers = {}
+    await client.async_get_site_information()
+
+    assert session.get.await_count == 3

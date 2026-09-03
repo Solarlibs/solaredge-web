@@ -56,6 +56,9 @@ _MAX_PLAYBACK_SPAN = timedelta(days=8)
 # Site-level production/consumption. The power endpoint answers in watts and
 # serves sub-daily slots; the energy endpoint answers in watt-hours and serves
 # daily and coarser slots. They share the same measurement shape.
+# Static site facts, including the site's IANA timezone.
+_SITE_INFORMATION_URL = f"{_LAYOUT_BASE_URL}/information/site"
+
 # Measured energy per optimizer/string/inverter over a date range.
 _BY_INVERTER_URL = f"{_LAYOUT_BASE_URL}/energy/site"
 
@@ -213,6 +216,7 @@ class SolarEdgeWeb:
         self._equipment: dict[str, dict[str, Any]] = {}
         self._site_structure: dict[str, Any] = {}
         self._site_components: dict[str, Any] = {}
+        self._site_information: dict[str, Any] = {}
         self._last_login_time = 0.0
         self._auth_headers: dict[str, str] = {}
         self._site_utc_offset: timedelta | None = None
@@ -293,6 +297,7 @@ class SolarEdgeWeb:
         self._equipment = {}
         self._site_structure = {}
         self._site_components = {}
+        self._site_information = {}
         self._last_login_time = time.time()
         _LOGGER.debug("Successfully completed OAuth2 login flow.")
 
@@ -400,6 +405,27 @@ class SolarEdgeWeb:
         url = f"{_DASHBOARD_BASE_URL}/site-details/{self.site_id}/components"
         self._site_components = await self._async_get_json(url, "site components")
         return self._site_components
+
+    async def async_get_site_information(self) -> dict[str, Any]:
+        """Get static facts about the site. Cached until the next login.
+
+        Returns ``peakPower`` (kWp), ``installationDate``, ``lifeTimeDate``,
+        ``latitude``/``longitude``, the site's current wall-clock ``siteTime``
+        and ``siteTimeZone`` as an IANA name, e.g. ``America/Los_Angeles``.
+
+        The timezone is worth having: every timestamp this client returns is
+        naive and expressed in it, so it is the only way for a caller to make
+        those values absolute.
+        """
+        await self.async_login()
+        if self._site_information:
+            _LOGGER.debug("Using cached site information for site: %s", self.site_id)
+            return self._site_information
+
+        _LOGGER.debug("Fetching site information for site: %s", self.site_id)
+        url = f"{_SITE_INFORMATION_URL}/{self.site_id}"
+        self._site_information = await self._async_get_json(url, "site information")
+        return self._site_information
 
     async def async_get_data_availability(self) -> dict[str, Any]:
         """Get the date range the site has data for.
