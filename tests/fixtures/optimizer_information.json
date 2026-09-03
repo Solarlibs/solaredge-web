@@ -1,0 +1,38 @@
+{
+    "basicInformationList": [
+        {
+            "type_": "apiOptimizerBasicInformation",
+            "serial": "7A012345-CA",
+            "model": "S440-1GM4MRM-NA02",
+            "bundleType": "NONE",
+            "modules": [
+                {
+                    "orientation": "PORTRAIT",
+                    "tilt": 0.3141592653589793,
+                    "azimuth": 1.7278759594743864,
+                    "manufacturer": "Test Panels",
+                    "model": "TP-390MS"
+                }
+            ],
+            "multiOptimizers": false
+        },
+        {
+            "type_": "apiOptimizerBasicInformation",
+            "serial": "7A012346-CA",
+            "model": "S440-1GM4MRM-NA02",
+            "bundleType": "NONE",
+            "modules": [],
+            "multiOptimizers": false
+        }
+    ],
+    "serialToLiveData": {
+        "7A012345-CA": {
+            "type_": "apiOptimizerLiveData",
+            "lastMeasurement": "2026-07-30T01:25:26Z",
+            "current_A": 0.51875,
+            "optimizerVoltage_V": 22.125,
+            "power_W": 18.934375,
+            "voltage_V": 36.5
+        }
+    }
+}

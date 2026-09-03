@@ -1,0 +1,31 @@
+{
+    "basicInformationList": [
+        {
+            "type_": "apiInverterBasicInformation",
+            "serial": "7E012345-57",
+            "manufacturer": "SolarEdge",
+            "fullModel": "SE7600H-US000BNU4",
+            "communication": "WIFI",
+            "communicationRole": "LEADER",
+            "dsp1Version": "1.100.2055",
+            "dsp2Version": "2.100.1751",
+            "cpuVersion": "4.23.36",
+            "countryName": "US 240V",
+            "countryCode": 12
+        }
+    ],
+    "serialToLiveData": {
+        "7E012345-57": {
+            "type_": "apiInverterLiveData",
+            "lastMeasurement": "2026-07-30T01:21:44Z",
+            "inverterStatus": "production",
+            "acEnergyOffGrid_Wh": 0.0,
+            "acEnergyOnGrid_Wh": 41.0,
+            "iRcd_A": 0.0011010573,
+            "lastIsolationValue_KOhm": 11000.0,
+            "pAc_W": 455.48105,
+            "powerLimit_percent": 100.0,
+            "vDc_V": 369.70453
+        }
+    }
+}

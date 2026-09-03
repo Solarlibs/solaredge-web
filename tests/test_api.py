@@ -20,6 +20,7 @@ from solaredge_web.solaredge import (
     _decode_energy_totals,
     _decode_playback,
     _decode_playback_verbose,
+    _parse_utc,
     _temperature_celsius,
     _to_utc_iso,
 )
@@ -1276,3 +1277,83 @@ def test_temperature_celsius_units():
     assert _temperature_celsius({"temperature": 40.0}) == 40.0
     assert _temperature_celsius({"temperature": None, "temperatureUnit": "CELSIUS"}) is None
     assert _temperature_celsius(None) is None
+
+
+async def test_async_get_optimizer_data():
+    """Live optimizer readings are keyed by serial and cost one request."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=_load_fixture("equipment.json"))])
+    session.post = AsyncMock(side_effect=[_mock_response(json_data=_load_fixture("optimizer_information.json"))])
+
+    client = _logged_in_client(session)
+    data = await client.async_get_optimizer_data()
+
+    assert session.post.await_count == 1
+    url = session.post.await_args_list[0].args[0]
+    assert url.endswith("services/layout/information/optimizers")
+    # The serials to read are the JSON body.
+    assert sorted(session.post.await_args_list[0].kwargs["json"]) == ["7A012345-CA", "7A012346-CA"]
+
+    optimizer = data["7A012345-CA"]
+    assert optimizer.power == 18.934375
+    assert optimizer.voltage == 36.5
+    assert optimizer.optimizer_voltage == 22.125
+    assert optimizer.current == 0.51875
+    # A real UTC instant, unlike the site-local timestamps elsewhere.
+    assert optimizer.last_measurement == datetime(2026, 7, 30, 1, 25, 26, tzinfo=timezone.utc)
+    assert optimizer.model == "S440-1GM4MRM-NA02"
+    assert optimizer.modules[0]["manufacturer"] == "Test Panels"
+
+
+async def test_async_get_optimizer_data_keeps_sleeping_optimizers():
+    """An optimizer with no live data is present with None readings."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=_load_fixture("equipment.json"))])
+    session.post = AsyncMock(side_effect=[_mock_response(json_data=_load_fixture("optimizer_information.json"))])
+
+    client = _logged_in_client(session)
+    data = await client.async_get_optimizer_data()
+
+    assert "7A012346-CA" in data
+    assert data["7A012346-CA"].power is None
+    assert data["7A012346-CA"].last_measurement is None
+    # Its basic information is still reported.
+    assert data["7A012346-CA"].model == "S440-1GM4MRM-NA02"
+
+
+async def test_async_get_inverter_data():
+    """Live inverter readings include firmware and status."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("equipment.json")),
+            _mock_response(json_data=_load_fixture("inverter_information.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    data = await client.async_get_inverter_data()
+
+    url = session.get.await_args_list[1].args[0]
+    assert "services/layout/information/inverters" in url
+    assert "inverter-serials=7E012345-57" in url
+
+    inverter = data["7E012345-57"]
+    assert inverter.power == 455.48105
+    assert inverter.dc_voltage == 369.70453
+    assert inverter.status == "production"
+    assert inverter.energy_on_grid == 41.0
+    assert inverter.isolation_resistance == 11000.0
+    assert inverter.model == "SE7600H-US000BNU4"
+    assert inverter.cpu_version == "4.23.36"
+    assert inverter.last_measurement == datetime(2026, 7, 30, 1, 21, 44, tzinfo=timezone.utc)
+
+
+def test_parse_utc_handles_z_suffix_and_offsets():
+    """Both Z and explicit offsets parse to aware UTC; junk is ignored."""
+    assert _parse_utc("2026-07-30T01:25:26Z") == datetime(2026, 7, 30, 1, 25, 26, tzinfo=timezone.utc)
+    assert _parse_utc("2026-07-29T18:25:26-07:00") == datetime(2026, 7, 30, 1, 25, 26, tzinfo=timezone.utc)
+    # No offset at all is documented as UTC by this endpoint.
+    assert _parse_utc("2026-07-30T01:25:26") == datetime(2026, 7, 30, 1, 25, 26, tzinfo=timezone.utc)
+    assert _parse_utc("nonsense") is None
+    assert _parse_utc(None) is None

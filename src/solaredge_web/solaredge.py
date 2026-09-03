@@ -59,6 +59,11 @@ _MAX_PLAYBACK_SPAN = timedelta(days=8)
 # Static site facts, including the site's IANA timezone.
 _SITE_INFORMATION_URL = f"{_LAYOUT_BASE_URL}/information/site"
 
+# Live per-device readings. The optimizer endpoint takes the serials to read
+# as a JSON array body, so a whole site costs one request.
+_OPTIMIZER_INFORMATION_URL = f"{_LAYOUT_BASE_URL}/information/optimizers"
+_INVERTER_INFORMATION_URL = f"{_LAYOUT_BASE_URL}/information/inverters"
+
 # Measured energy per optimizer/string/inverter over a date range.
 _BY_INVERTER_URL = f"{_LAYOUT_BASE_URL}/energy/site"
 
@@ -194,6 +199,55 @@ class LivePower:
     is_communicating: bool | None
     last_update_time: datetime | None
     power_flow: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass
+class OptimizerData:
+    """Live readings for a single optimizer.
+
+    Power is in W, voltages in V and current in A. ``voltage`` is the module
+    side, ``optimizer_voltage`` the optimizer's output.
+
+    Unlike every other timestamp in this module, ``last_measurement`` is an
+    aware UTC datetime, because this endpoint reports a real UTC instant
+    rather than the site's local time.
+    """
+
+    serial: str
+    power: float | None = None
+    voltage: float | None = None
+    optimizer_voltage: float | None = None
+    current: float | None = None
+    last_measurement: datetime | None = None
+    model: str | None = None
+    modules: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class InverterData:
+    """Live readings and firmware details for a single inverter.
+
+    Power is in W, voltage in V, energy in Wh, current in A and isolation
+    resistance in kOhm. ``last_measurement`` is an aware UTC datetime, as for
+    :class:`OptimizerData`.
+    """
+
+    serial: str
+    power: float | None = None
+    dc_voltage: float | None = None
+    status: str | None = None
+    energy_on_grid: float | None = None
+    energy_off_grid: float | None = None
+    power_limit_percent: float | None = None
+    isolation_resistance: float | None = None
+    residual_current: float | None = None
+    last_measurement: datetime | None = None
+    model: str | None = None
+    manufacturer: str | None = None
+    communication: str | None = None
+    cpu_version: str | None = None
+    dsp1_version: str | None = None
+    dsp2_version: str | None = None
 
 
 class SolarEdgeWeb:
@@ -438,6 +492,41 @@ class SolarEdgeWeb:
         _LOGGER.debug("Fetching data availability for site: %s", self.site_id)
         url = f"{_DASHBOARD_BASE_URL}/data-availability/sites/{self.site_id}"
         return await self._async_get_json(url, "data availability")
+
+    async def async_get_optimizer_data(self) -> dict[str, OptimizerData]:
+        """Get live readings for every optimizer, keyed by full serial.
+
+        One request covers the whole site: the endpoint takes the serials to
+        read as a JSON array body.
+
+        These are the values the module-level view shows, refreshed by the
+        inverter every few minutes. Optimizers that are asleep report a power
+        of 0 or no live data at all; those still appear in the result with
+        ``None`` readings so callers can tell them apart from missing devices.
+        """
+        equipment = await self.async_get_equipment()
+        serials = [eq_id for eq_id, data in equipment.items() if data.get("type") == "OPTIMIZER"]
+        if not serials:
+            _LOGGER.warning("No optimizers found in the layout for site %s", self.site_id)
+            return {}
+
+        _LOGGER.debug("Fetching live data for %s optimizers on site: %s", len(serials), self.site_id)
+        resp_json = await self._async_post_json(_OPTIMIZER_INFORMATION_URL, serials, "optimizer data")
+        return _decode_optimizer_data(resp_json, serials)
+
+    async def async_get_inverter_data(self) -> dict[str, InverterData]:
+        """Get live readings and firmware details for every inverter, keyed by serial."""
+        await self.async_get_equipment()
+        serials = _collect_inverter_serials(self._site_structure)
+        if not serials:
+            _LOGGER.warning("No inverters found in the layout for site %s", self.site_id)
+            return {}
+
+        _LOGGER.debug("Fetching live data for %s inverters on site: %s", len(serials), self.site_id)
+        params = [("inverter-serials", serial) for serial in serials]
+        url = f"{_INVERTER_INFORMATION_URL}?{urlencode(params)}"
+        resp_json = await self._async_get_json(url, "inverter data")
+        return _decode_inverter_data(resp_json, serials)
 
     async def async_get_energy_data(
         self,
@@ -766,8 +855,20 @@ class SolarEdgeWeb:
             power_flow=power_flow,
         )
 
-    async def _async_get_json(self, url: str, description: str) -> dict[str, Any]:
-        """GET a monitoring API endpoint and return the decoded JSON body.
+    async def _async_post_json(self, url: str, payload: Any, description: str) -> dict[str, Any]:
+        """POST a JSON body to a monitoring API endpoint and return the response."""
+        try:
+            resp = await self.session.post(url, json=payload, headers=self._request_headers(), timeout=self.timeout)
+            _LOGGER.debug("Got %s from %s", resp.status, url)
+            resp.raise_for_status()
+            resp_json: dict[str, Any] = await resp.json()
+        except aiohttp.ClientError:
+            _LOGGER.exception("Error fetching %s from %s", description, url)
+            raise
+        return resp_json
+
+    def _request_headers(self) -> dict[str, str]:
+        """Build the auth headers for an API request.
 
         Sends the bearer token from the last login plus the CSRF token the
         backend hands out as a cookie; endpoints behind the API gateway reject
@@ -777,9 +878,12 @@ class SolarEdgeWeb:
         csrf_token_cookie = self._find_cookie("CSRF-TOKEN")
         if csrf_token_cookie and csrf_token_cookie.value:
             headers["X-CSRF-TOKEN"] = csrf_token_cookie.value
+        return headers
 
+    async def _async_get_json(self, url: str, description: str) -> dict[str, Any]:
+        """GET a monitoring API endpoint and return the decoded JSON body."""
         try:
-            resp = await self.session.get(url, headers=headers, timeout=self.timeout)
+            resp = await self.session.get(url, headers=self._request_headers(), timeout=self.timeout)
             _LOGGER.debug("Got %s from %s", resp.status, url)
             resp.raise_for_status()
             resp_json: dict[str, Any] = await resp.json()
@@ -1161,6 +1265,81 @@ def _decode_energy_totals(resp_json: dict[str, Any], site_structure: dict[str, A
     return totals
 
 
+def _parse_utc(raw_time: Any) -> datetime | None:
+    """Parse a real UTC timestamp, e.g. ``2026-07-30T01:25:26Z``.
+
+    ``fromisoformat`` only learned to accept the ``Z`` suffix in 3.11 and this
+    package supports 3.10, so it is spelled out as an offset first.
+    """
+    if not raw_time:
+        return None
+    text = str(raw_time)
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        _LOGGER.warning("Ignoring invalid timestamp: %r", raw_time)
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _decode_optimizer_data(resp_json: dict[str, Any], serials: list[str]) -> dict[str, OptimizerData]:
+    """Decode an optimizer information response, keyed by full serial."""
+    basic_by_serial = {(entry.get("serial") or "").strip(): entry for entry in resp_json.get("basicInformationList") or []}
+    live_by_serial = resp_json.get("serialToLiveData") or {}
+
+    result: dict[str, OptimizerData] = {}
+    for serial in serials:
+        basic = basic_by_serial.get(serial) or {}
+        live = live_by_serial.get(serial) or {}
+        result[serial] = OptimizerData(
+            serial=serial,
+            power=_as_float(live.get("power_W")),
+            voltage=_as_float(live.get("voltage_V")),
+            optimizer_voltage=_as_float(live.get("optimizerVoltage_V")),
+            current=_as_float(live.get("current_A")),
+            last_measurement=_parse_utc(live.get("lastMeasurement")),
+            model=basic.get("model"),
+            modules=list(basic.get("modules") or []),
+        )
+
+    _LOGGER.debug("Decoded live data for %s optimizers.", len(result))
+    return result
+
+
+def _decode_inverter_data(resp_json: dict[str, Any], serials: list[str]) -> dict[str, InverterData]:
+    """Decode an inverter information response, keyed by serial."""
+    basic_by_serial = {(entry.get("serial") or "").strip(): entry for entry in resp_json.get("basicInformationList") or []}
+    live_by_serial = resp_json.get("serialToLiveData") or {}
+
+    result: dict[str, InverterData] = {}
+    for serial in serials:
+        basic = basic_by_serial.get(serial) or {}
+        live = live_by_serial.get(serial) or {}
+        result[serial] = InverterData(
+            serial=serial,
+            power=_as_float(live.get("pAc_W")),
+            dc_voltage=_as_float(live.get("vDc_V")),
+            status=live.get("inverterStatus"),
+            energy_on_grid=_as_float(live.get("acEnergyOnGrid_Wh")),
+            energy_off_grid=_as_float(live.get("acEnergyOffGrid_Wh")),
+            power_limit_percent=_as_float(live.get("powerLimit_percent")),
+            isolation_resistance=_as_float(live.get("lastIsolationValue_KOhm")),
+            residual_current=_as_float(live.get("iRcd_A")),
+            last_measurement=_parse_utc(live.get("lastMeasurement")),
+            model=basic.get("fullModel"),
+            manufacturer=basic.get("manufacturer"),
+            communication=basic.get("communication"),
+            cpu_version=basic.get("cpuVersion"),
+            dsp1_version=basic.get("dsp1Version"),
+            dsp2_version=basic.get("dsp2Version"),
+        )
+
+    _LOGGER.debug("Decoded live data for %s inverters.", len(result))
+    return result
+
+
 def _temperature_celsius(temperature: Any) -> float | None:
     """Read a ``{"temperature": .., "temperatureUnit": ..}`` object as Celsius."""
     if not isinstance(temperature, dict):
@@ -1291,7 +1470,9 @@ def _decode_playback_verbose(
 __all__ = [
     "ConsumptionData",
     "EnergyData",
+    "InverterData",
     "LivePower",
+    "OptimizerData",
     "SiteEnergyData",
     "SolarEdgeWeb",
 ]
