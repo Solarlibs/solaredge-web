@@ -12,7 +12,8 @@ It will:
 1. Authenticate via the OAuth2 PKCE flow.
 2. Fetch the equipment layout (inverters, strings, optimizers).
 3. Fetch hourly playback energy data for the last 7 days.
-4. Print a summary that you can compare against the SolarEdge web UI.
+4. Fetch consumption, measured energy totals, site energy and live power.
+5. Print a summary that you can compare against the SolarEdge web UI.
 """
 
 from __future__ import annotations
@@ -23,19 +24,20 @@ import getpass
 import logging
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
 
 import aiohttp
 
-if TYPE_CHECKING:
-    from datetime import datetime
-
 try:
-    from .solaredge import EnergyData, SolarEdgeWeb, _device_id
+    from .solaredge import ConsumptionData, EnergyData, LivePower, SiteEnergyData, SolarEdgeWeb, _device_id
 except ImportError:
     from solaredge import (  # type: ignore[no-redef,import-not-found]
+        ConsumptionData,
         EnergyData,
+        LivePower,
+        SiteEnergyData,
         SolarEdgeWeb,
         _device_id,
     )
@@ -105,6 +107,59 @@ def _print_data(energy_data: list[EnergyData], first_optimizer: str, site_name: 
         print(f"{_format_time(ed.start_time):<20} {value:>12.1f}")
 
 
+def _format_value(value: float | None) -> str:
+    """Format a measurement, showing unmeasured values as a dash."""
+    return "-" if value is None else f"{value:.1f}"
+
+
+def _print_consumption(data: list[ConsumptionData], has_meter: bool) -> None:
+    """Print the most recent hourly production/consumption slots."""
+    print("\n=== Consumption (last 7 days, hourly) ===")
+    print(f"Retrieved {len(data)} hourly entries.")
+    if not has_meter:
+        print("This site has no consumption meter, so only production is measured.")
+    print(f"{'Time (site local)':<20} {'Production':>12} {'Consumption':>12} {'Import':>10} {'Export':>10}")
+    print("-" * 68)
+    for cd in data[-24:]:
+        print(
+            f"{_format_time(cd.start_time):<20} {_format_value(cd.production):>12} "
+            f"{_format_value(cd.consumption):>12} {_format_value(cd.imported):>10} "
+            f"{_format_value(cd.exported):>10}"
+        )
+
+
+def _print_totals(
+    totals: dict[str, float],
+    equipment: dict[str, dict[str, Any]],
+    site_key: str,
+    playback_total: float,
+) -> None:
+    """Print measured energy totals next to the playback-derived total."""
+    print("\n=== Measured Energy Totals (today, Wh) ===")
+    for eq_id, value in sorted(totals.items(), key=lambda item: -item[1]):
+        eq_type = "SITE" if eq_id == site_key else equipment.get(eq_id, {}).get("type", "?")
+        print(f"  [{eq_type:<9}] {eq_id:<40} {value:>12.1f}")
+    measured = totals.get(site_key)
+    if measured is not None:
+        print(f"\nSite total: measured {measured:.1f} Wh vs playback-derived {playback_total:.1f} Wh")
+
+
+def _print_site_energy(data: list[SiteEnergyData]) -> None:
+    """Print today's hourly site energy."""
+    print("\n=== Site Energy (today, hourly) ===")
+    print(f"{'Time (site local)':<20} {'Energy (Wh)':>12}")
+    print("-" * 34)
+    for entry in data:
+        print(f"{_format_time(entry.start_time):<20} {_format_value(entry.energy):>12}")
+
+
+def _print_live_power(live: LivePower) -> None:
+    """Print the current site power."""
+    print("\n=== Live Power ===")
+    print(f"Current: {_format_value(live.current_power)} W of {_format_value(live.max_power)} W")
+    print(f"Communicating: {live.is_communicating} | Last update: {live.last_update_time}")
+
+
 async def async_main() -> None:
     """Run API exercises."""
     args = parse_args()
@@ -153,6 +208,26 @@ async def async_main() -> None:
                 site_name = site_node.get("name", site_id)
 
                 _print_data(energy_data, first_optimizer, site_name, site_key)
+
+            print("\n=== Site Capabilities ===")
+            components = await client.async_get_site_components()
+            has_meter = bool(components.get("hasConsumptionAndGrid"))
+            print(f"  Type: {components.get('siteType')} | Inverters: {components.get('inverterCount')}")
+            print(f"  Consumption meter: {has_meter} | Storage: {components.get('hasStorage')}")
+            print(f"  Data available: {await client.async_get_data_availability()}")
+
+            _print_consumption(await client.async_get_consumption_data(), has_meter)
+
+            site_node = client._site_structure
+            site_key = _device_id(site_node) or site_id
+            playback_total = sum(
+                ed.values.get(site_key, 0.0) for ed in energy_data if ed.start_time.date() == datetime.now().date()
+            )
+            _print_totals(await client.async_get_energy_totals(), equipment, site_key, playback_total)
+
+            _print_site_energy(await client.async_get_site_energy())
+
+            _print_live_power(await client.async_get_live_power())
 
         except aiohttp.ClientError as err:
             print(f"\nAPI Error: {err}", file=sys.stderr)
