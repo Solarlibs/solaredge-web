@@ -1,0 +1,8 @@
+{
+    "updateRefreshRate": 3,
+    "isRealTime": true,
+    "isCommunicating": true,
+    "solarProduction": {"isActive": true, "currentPower": 2.44, "isProducing": true},
+    "energyProducers": ["solar"],
+    "lastUpdateTime": "2026-07-30T17:16:45.043-07:00"
+}

@@ -74,6 +74,11 @@ _SITE_ENERGY_SPANS = {
 # Units the by-inverter endpoint reports energy in, as a factor to Wh.
 _ENERGY_UNIT_TO_WH = {"watt-hour": 1.0, "kilo-watt-hour": 1000.0, "mega-watt-hour": 1000000.0}
 
+# Live figures. live-power reports watts precisely; power-flow rounds to kW
+# but adds the site status and, on metered sites, the consumption/grid legs.
+_LIVE_POWER_URL = f"{_DASHBOARD_BASE_URL}/live-power/sites"
+_POWER_FLOW_URL = f"{_DASHBOARD_BASE_URL}/power-flow/v2/sites"
+
 _SITE_POWER_URL = f"{_DASHBOARD_BASE_URL}/power/sites"
 _SITE_ENERGY_URL = f"{_DASHBOARD_BASE_URL}/energy/sites"
 
@@ -171,6 +176,25 @@ class SiteEnergyData:
 
     start_time: datetime
     energy: float | None
+
+
+@dataclasses.dataclass
+class LivePower:
+    """The site's current power. Values are in W.
+
+    last_update_time is naive and expressed in the site's local time.
+
+    ``power_flow`` is the raw power-flow payload. Sites with a consumption
+    meter or a battery report extra legs there (consumption, grid, storage)
+    that a production-only site does not have, so it is passed through rather
+    than flattened.
+    """
+
+    current_power: float | None
+    max_power: float | None
+    is_communicating: bool | None
+    last_update_time: datetime | None
+    power_flow: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 class SolarEdgeWeb:
@@ -642,6 +666,37 @@ class SolarEdgeWeb:
         _LOGGER.debug("Fetching %s site energy for site: %s (%s..%s)", resolution, self.site_id, start, end)
         resp_json = await self._async_get_json(url, "site energy")
         return _decode_energy_graph(resp_json)
+
+    async def async_get_live_power(self) -> LivePower:
+        """Get the site's current power. Values are in W.
+
+        Combines the two endpoints the web app polls: ``live-power`` for the
+        current and rated AC power, and ``power-flow`` for the site status and
+        the flow legs that exist on metered or battery sites.
+        """
+        await self.async_login()
+        _LOGGER.debug("Fetching live power for site: %s", self.site_id)
+
+        live = await self._async_get_json(f"{_LIVE_POWER_URL}/{self.site_id}", "live power")
+        power_flow = await self._async_get_json(f"{_POWER_FLOW_URL}/{self.site_id}", "power flow")
+
+        last_update_time = None
+        raw_time = power_flow.get("lastUpdateTime")
+        if raw_time:
+            try:
+                # The offset is the site's, so dropping it yields site-local time.
+                last_update_time = _as_naive(datetime.fromisoformat(raw_time))
+            except (TypeError, ValueError):
+                _LOGGER.warning("Ignoring invalid lastUpdateTime: %r", raw_time)
+
+        is_communicating = power_flow.get("isCommunicating")
+        return LivePower(
+            current_power=_as_float(live.get("currentAcPower")),
+            max_power=_as_float(live.get("maxAcPower")),
+            is_communicating=bool(is_communicating) if is_communicating is not None else None,
+            last_update_time=last_update_time,
+            power_flow=power_flow,
+        )
 
     async def _async_get_json(self, url: str, description: str) -> dict[str, Any]:
         """GET a monitoring API endpoint and return the decoded JSON body.
@@ -1137,6 +1192,7 @@ def _decode_playback_verbose(
 __all__ = [
     "ConsumptionData",
     "EnergyData",
+    "LivePower",
     "SiteEnergyData",
     "SolarEdgeWeb",
 ]

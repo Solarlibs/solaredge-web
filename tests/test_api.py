@@ -1136,3 +1136,46 @@ def test_decode_energy_graph_empty(caplog):
     with caplog.at_level(logging.WARNING):
         assert _decode_energy_graph({"energyBars": []}) == []
     assert "No energy bars returned" in caplog.text
+
+
+async def test_async_get_live_power():
+    """Live power comes from live-power, status and flow from power-flow."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("live_power.json")),
+            _mock_response(json_data=_load_fixture("power_flow.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    live = await client.async_get_live_power()
+
+    assert session.get.await_args_list[0].args[0].endswith("services/dashboard/live-power/sites/123")
+    assert session.get.await_args_list[1].args[0].endswith("services/dashboard/power-flow/v2/sites/123")
+    # Watts, not the kW the power-flow payload rounds to.
+    assert live.current_power == 2438.2266
+    assert live.max_power == 7600.0
+    assert live.is_communicating is True
+    assert live.last_update_time == datetime(2026, 7, 30, 17, 16, 45, 43000)
+    assert live.power_flow["solarProduction"]["currentPower"] == 2.44
+
+
+async def test_async_get_live_power_tolerates_missing_fields():
+    """Absent or unparsable values become None instead of raising."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data={}),
+            _mock_response(json_data={"lastUpdateTime": "not-a-time"}),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    live = await client.async_get_live_power()
+
+    assert live.current_power is None
+    assert live.max_power is None
+    assert live.is_communicating is None
+    assert live.last_update_time is None
+    assert live.power_flow == {"lastUpdateTime": "not-a-time"}
