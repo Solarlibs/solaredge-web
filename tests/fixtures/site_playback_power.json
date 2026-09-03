@@ -1,0 +1,124 @@
+{
+    "sitePowerMeasurements": [
+        {
+            "measurementTime": "2026-07-30T00:00:00-07:00",
+            "powerW": null,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T01:00:00-07:00",
+            "powerW": null,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T02:00:00-07:00",
+            "powerW": null,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T03:00:00-07:00",
+            "powerW": null,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T04:00:00-07:00",
+            "powerW": null,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T05:00:00-07:00",
+            "powerW": null,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T06:00:00-07:00",
+            "powerW": 0.0,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T07:00:00-07:00",
+            "powerW": 108.30718,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T08:00:00-07:00",
+            "powerW": 1249.0824,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T09:00:00-07:00",
+            "powerW": 3062.6167,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T10:00:00-07:00",
+            "powerW": 5799.7476,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T11:00:00-07:00",
+            "powerW": 5981.9824,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T12:00:00-07:00",
+            "powerW": 5882.978,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T13:00:00-07:00",
+            "powerW": 5609.5244,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T14:00:00-07:00",
+            "powerW": 5780.796,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T15:00:00-07:00",
+            "powerW": 3613.9238,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T16:00:00-07:00",
+            "powerW": 3426.5747,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T17:00:00-07:00",
+            "powerW": 1766.0,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T18:00:00-07:00",
+            "powerW": null,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T19:00:00-07:00",
+            "powerW": null,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T20:00:00-07:00",
+            "powerW": null,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T21:00:00-07:00",
+            "powerW": null,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T22:00:00-07:00",
+            "powerW": null,
+            "color": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T23:00:00-07:00",
+            "powerW": null,
+            "color": 0.0
+        }
+    ]
+}

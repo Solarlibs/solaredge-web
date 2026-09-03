@@ -20,6 +20,7 @@ from solaredge_web.solaredge import (
     _decode_energy_totals,
     _decode_playback,
     _decode_playback_verbose,
+    _decode_site_power,
     _parse_utc,
     _temperature_celsius,
     _to_utc_iso,
@@ -1357,3 +1358,96 @@ def test_parse_utc_handles_z_suffix_and_offsets():
     assert _parse_utc("2026-07-30T01:25:26") == datetime(2026, 7, 30, 1, 25, 26, tzinfo=timezone.utc)
     assert _parse_utc("nonsense") is None
     assert _parse_utc(None) is None
+
+
+async def test_async_get_optimizer_energy():
+    """Optimizer energy is charted per slot in Wh for the requested serials."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=_load_fixture("energy_graph_optimizer.json"))])
+
+    client = _logged_in_client(session)
+    data = await client.async_get_optimizer_energy(
+        ["7A012345-CA", "7A012346-CA"], datetime(2026, 7, 30), datetime(2026, 7, 30)
+    )
+
+    url = session.get.await_args_list[0].args[0]
+    assert "services/layout/energy-graph/site/123/optimizers" in url
+    assert "optimizer-serials=7A012345-CA" in url
+    assert "optimizer-serials=7A012346-CA" in url
+    assert "chart-time-unit=hours" in url
+    assert data[11].start_time == datetime(2026, 7, 30, 11, 0)
+    assert data[11].energy == 190.0
+    assert data[23].energy is None
+
+
+async def test_async_get_optimizer_energy_validates_input():
+    """An empty serial list or unknown resolution fails before any request."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock()
+
+    client = _logged_in_client(session)
+    with pytest.raises(ValueError, match="At least one optimizer serial"):
+        await client.async_get_optimizer_energy([])
+    with pytest.raises(ValueError, match="Unsupported resolution"):
+        await client.async_get_optimizer_energy(["7A012345-CA"], resolution="quarter-hours")
+
+    session.get.assert_not_awaited()
+
+
+async def test_async_get_site_energy_total():
+    """The site energy total is a single Wh number."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data={"energy": 42665.0})])
+
+    client = _logged_in_client(session)
+    total = await client.async_get_site_energy_total(datetime(2026, 7, 30), datetime(2026, 7, 30))
+
+    assert total == 42665.0
+    url = session.get.await_args_list[0].args[0]
+    assert "services/layout/energy/site/123?" in url
+    assert "start-date=2026-07-30" in url
+
+
+async def test_async_get_site_energy_total_missing_value():
+    """A response without an energy figure returns None rather than raising."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data={})])
+
+    client = _logged_in_client(session)
+    assert await client.async_get_site_energy_total() is None
+
+
+async def test_async_get_site_power():
+    """Site power slots are in W with naive site-local times."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=_load_fixture("site_playback_power.json"))])
+
+    client = _logged_in_client(session)
+    data = await client.async_get_site_power(datetime(2026, 7, 30), datetime(2026, 7, 30))
+
+    url = session.get.await_args_list[0].args[0]
+    assert "services/layout/playback/site/123?" in url
+    assert "resolution=hours" in url
+    assert len(data) == 24
+    assert data[10].start_time == datetime(2026, 7, 30, 10, 0)
+    assert data[10].power == 5799.7476
+    assert data[0].power is None
+
+
+async def test_async_get_site_power_rejects_unknown_resolution():
+    """Days is not served by the playback endpoint."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock()
+
+    client = _logged_in_client(session)
+    with pytest.raises(ValueError, match="Unsupported resolution"):
+        await client.async_get_site_power(resolution="days")
+
+    session.get.assert_not_awaited()
+
+
+def test_decode_site_power_empty(caplog):
+    """An empty site power response returns an empty list and warns."""
+    with caplog.at_level(logging.WARNING):
+        assert _decode_site_power({"sitePowerMeasurements": []}) == []
+    assert "No measurements returned in the site power response" in caplog.text

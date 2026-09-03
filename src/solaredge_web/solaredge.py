@@ -64,11 +64,17 @@ _SITE_INFORMATION_URL = f"{_LAYOUT_BASE_URL}/information/site"
 _OPTIMIZER_INFORMATION_URL = f"{_LAYOUT_BASE_URL}/information/optimizers"
 _INVERTER_INFORMATION_URL = f"{_LAYOUT_BASE_URL}/information/inverters"
 
-# Measured energy per optimizer/string/inverter over a date range.
-_BY_INVERTER_URL = f"{_LAYOUT_BASE_URL}/energy/site"
+# Measured energy: the site total, and the per-optimizer/string/inverter
+# breakdown under the /by-inverter suffix.
+_LAYOUT_ENERGY_URL = f"{_LAYOUT_BASE_URL}/energy/site"
 
-# Site-level energy per time slot, as the web app charts it.
+# Site-level energy per time slot, as the web app charts it. The /optimizers
+# suffix charts a set of optimizers instead, summed into a single series.
 _ENERGY_GRAPH_URL = f"{_LAYOUT_BASE_URL}/energy-graph/site"
+
+# Site power per time slot. Accepts hours (multi-day) and quarter-hours
+# (a single day); days is rejected.
+_SITE_PLAYBACK_SPANS = {"hours": (timedelta(days=7), timedelta(days=7)), "quarter-hours": (timedelta(0), timedelta(0))}
 
 # Widest span this endpoint accepts per resolution, and the default span used
 # when the caller does not pass dates. "hours" only serves a single day.
@@ -180,6 +186,18 @@ class SiteEnergyData:
 
     start_time: datetime
     energy: float | None
+
+
+@dataclasses.dataclass
+class SitePowerData:
+    """Site-level power for a single time slot. Value is in W.
+
+    start_time is naive and expressed in the site's local time. ``power`` is
+    ``None`` for slots the site has not reported.
+    """
+
+    start_time: datetime
+    power: float | None
 
 
 @dataclasses.dataclass
@@ -773,7 +791,7 @@ class SolarEdgeWeb:
             ("include-max-temperature", "true" if include_temperature else "false"),
             ("include-color", "true"),
         ]
-        url = f"{_BY_INVERTER_URL}/{self.site_id}/by-inverter?{urlencode(params)}"
+        url = f"{_LAYOUT_ENERGY_URL}/{self.site_id}/by-inverter?{urlencode(params)}"
 
         _LOGGER.debug("Fetching by-inverter data for site: %s (%s..%s)", self.site_id, start, end)
         return await self._async_get_json(url, "by-inverter data")
@@ -801,6 +819,125 @@ class SolarEdgeWeb:
 
         await self.async_login()
 
+        start, end = self._energy_graph_range(resolution, start_date, end_date)
+        params = [
+            ("chart-time-unit", resolution),
+            ("start-date", start.isoformat()),
+            ("end-date", end.isoformat()),
+        ]
+        url = f"{_ENERGY_GRAPH_URL}/{self.site_id}?{urlencode(params)}"
+
+        _LOGGER.debug("Fetching %s site energy for site: %s (%s..%s)", resolution, self.site_id, start, end)
+        resp_json = await self._async_get_json(url, "site energy")
+        return _decode_energy_graph(resp_json)
+
+    async def async_get_optimizer_energy(
+        self,
+        optimizer_serials: list[str],
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        resolution: str = "hours",
+    ) -> list[SiteEnergyData]:
+        """Get measured energy per time slot for a set of optimizers. Values are in Wh.
+
+        These are exact figures, matching :meth:`async_get_energy_totals` to
+        the decimal, where :meth:`async_get_energy_data` only approximates by
+        summing hourly power.
+
+        The API sums the requested optimizers into a single series rather than
+        breaking them down, so a per-optimizer series costs one call per
+        optimizer. That is a lot of requests for a large site; prefer
+        :meth:`async_get_energy_data` unless the extra accuracy is needed.
+
+        ``resolution`` and the range limits are as for
+        :meth:`async_get_site_energy`.
+        """
+        if resolution not in _SITE_ENERGY_SPANS:
+            msg = f"Unsupported resolution {resolution!r}; expected one of {', '.join(_SITE_ENERGY_SPANS)}"
+            raise ValueError(msg)
+        if not optimizer_serials:
+            msg = "At least one optimizer serial is required"
+            raise ValueError(msg)
+
+        await self.async_login()
+        start, end = self._energy_graph_range(resolution, start_date, end_date)
+        params = [
+            ("chart-time-unit", resolution),
+            ("start-date", start.isoformat()),
+            ("end-date", end.isoformat()),
+            *[("optimizer-serials", serial) for serial in optimizer_serials],
+        ]
+        url = f"{_ENERGY_GRAPH_URL}/{self.site_id}/optimizers?{urlencode(params)}"
+
+        _LOGGER.debug("Fetching %s energy for %s optimizers", resolution, len(optimizer_serials))
+        resp_json = await self._async_get_json(url, "optimizer energy")
+        return _decode_energy_graph(resp_json)
+
+    async def async_get_site_energy_total(
+        self,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> float | None:
+        """Get the site's total measured energy over a date range, in Wh.
+
+        The single number behind the site's energy figure, with no breakdown
+        and no time series. Defaults to today.
+        """
+        await self.async_login()
+        end = (_as_naive(end_date) if end_date else datetime.now()).date()
+        start = _as_naive(start_date).date() if start_date else end
+
+        params = [("start-date", start.isoformat()), ("end-date", end.isoformat())]
+        url = f"{_LAYOUT_ENERGY_URL}/{self.site_id}?{urlencode(params)}"
+        resp_json = await self._async_get_json(url, "site energy total")
+        return _as_float(resp_json.get("energy"))
+
+    async def async_get_site_power(
+        self,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        resolution: str = "hours",
+    ) -> list[SitePowerData]:
+        """Get site-level power per time slot. Values are in W.
+
+        ``resolution`` is ``hours`` (up to 8 days per request) or
+        ``quarter-hours`` (a single day). This is the site total behind the
+        playback view, so unlike :meth:`async_get_energy_data` it needs no
+        per-optimizer aggregation.
+        """
+        if resolution not in _SITE_PLAYBACK_SPANS:
+            msg = f"Unsupported resolution {resolution!r}; expected one of {', '.join(_SITE_PLAYBACK_SPANS)}"
+            raise ValueError(msg)
+
+        await self.async_login()
+        max_span, default_span = _SITE_PLAYBACK_SPANS[resolution]
+        end = (_as_naive(end_date) if end_date else datetime.now()).date()
+        start = _as_naive(start_date).date() if start_date else end - default_span
+        if end - start > max_span:
+            _LOGGER.warning(
+                "Requested range %s..%s is wider than the %s days the API allows for %s; expect HTTP 400",
+                start,
+                end,
+                max_span.days,
+                resolution,
+            )
+
+        params = [
+            ("resolution", resolution),
+            ("start-date", start.isoformat()),
+            ("end-date", end.isoformat()),
+        ]
+        url = f"{_PLAYBACK_BASE_URL}/{self.site_id}?{urlencode(params)}"
+        resp_json = await self._async_get_json(url, "site power")
+        return _decode_site_power(resp_json)
+
+    def _energy_graph_range(
+        self,
+        resolution: str,
+        start_date: datetime | None,
+        end_date: datetime | None,
+    ) -> tuple[date, date]:
+        """Resolve the date range for an energy-graph request, warning if too wide."""
         max_span, default_span = _SITE_ENERGY_SPANS[resolution]
         end = (_as_naive(end_date) if end_date else datetime.now()).date()
         start = _as_naive(start_date).date() if start_date else end - default_span
@@ -812,17 +949,7 @@ class SolarEdgeWeb:
                 max_span.days,
                 resolution,
             )
-
-        params = [
-            ("chart-time-unit", resolution),
-            ("start-date", start.isoformat()),
-            ("end-date", end.isoformat()),
-        ]
-        url = f"{_ENERGY_GRAPH_URL}/{self.site_id}?{urlencode(params)}"
-
-        _LOGGER.debug("Fetching %s site energy for site: %s (%s..%s)", resolution, self.site_id, start, end)
-        resp_json = await self._async_get_json(url, "site energy")
-        return _decode_energy_graph(resp_json)
+        return start, end
 
     async def async_get_live_power(self) -> LivePower:
         """Get the site's current power. Values are in W.
@@ -1371,6 +1498,30 @@ def _decode_optimizer_temperatures(resp_json: dict[str, Any]) -> dict[str, float
     return temperatures
 
 
+def _decode_site_power(resp_json: dict[str, Any]) -> list[SitePowerData]:
+    """Decode a site playback response into power slots."""
+    measurements = resp_json.get("sitePowerMeasurements", [])
+    if not measurements:
+        _LOGGER.warning("No measurements returned in the site power response.")
+        return []
+
+    result: list[SitePowerData] = []
+    for measurement in measurements:
+        raw_time = measurement.get("measurementTime")
+        if not raw_time:
+            continue
+        try:
+            # The offset is the site's, so dropping it yields site-local time.
+            slot_time = _as_naive(datetime.fromisoformat(raw_time))
+        except (TypeError, ValueError):
+            _LOGGER.warning("Skipping site power measurement with invalid time: %r", raw_time)
+            continue
+        result.append(SitePowerData(start_time=slot_time, power=_as_float(measurement.get("powerW"))))
+
+    _LOGGER.debug("Decoded %s site power slots.", len(result))
+    return result
+
+
 def _decode_energy_graph(resp_json: dict[str, Any]) -> list[SiteEnergyData]:
     """Decode an energy-graph response into site energy slots."""
     energy_bars = resp_json.get("energyBars", [])
@@ -1474,5 +1625,6 @@ __all__ = [
     "LivePower",
     "OptimizerData",
     "SiteEnergyData",
+    "SitePowerData",
     "SolarEdgeWeb",
 ]

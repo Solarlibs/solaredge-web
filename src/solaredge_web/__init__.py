@@ -7,6 +7,7 @@ from .solaredge import (
     LivePower,
     OptimizerData,
     SiteEnergyData,
+    SitePowerData,
     SolarEdgeWeb,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "LivePower",
     "OptimizerData",
     "SiteEnergyData",
+    "SitePowerData",
     "SolarEdgeWeb",
 ]
