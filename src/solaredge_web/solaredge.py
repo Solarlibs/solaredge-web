@@ -431,6 +431,20 @@ class SolarEdgeWeb:
         If start_date/end_date are not provided, defaults to the last 7 days
         up to the end of today (in local time). The API rejects ranges wider
         than 7 days with HTTP 400, so the default is already at the maximum.
+
+        The last day of the window comes back short on sites west of UTC:
+        end-date is matched against a real UTC instant while slots are labelled
+        in the site's local time, so a naive end of 23:59:59 stops at
+        23:59:59Z, which is 16:59 local at UTC-7. Measured on one such site,
+        a day totals 40802 Wh when it is the last day of the window and
+        43207 Wh when it is an interior day.
+
+        Earlier days are unaffected, so callers polling a rolling window fill
+        the gap in on a later refresh, once that day is no longer last. This
+        is why passing no dates is fine for that pattern. An aware end_date
+        widens the window correctly, but the newest hours can still be empty:
+        per-optimizer playback data lags the site-level figures from
+        :meth:`async_get_site_energy` by an hour or two.
         """
         await self.async_get_equipment()
 
@@ -497,6 +511,11 @@ class SolarEdgeWeb:
 
     async def _async_fetch_playback(self, endpoint: str, start_date: datetime, end_date: datetime) -> dict[str, Any]:
         """Fetch a playback response for the given endpoint and date range."""
+        # end-date is compared against a real UTC instant even though the slots
+        # come back labelled in the site's local time, so the last day of the
+        # window loses everything after that instant. Do not "fix" this by
+        # splitting the range into per-day requests: every day then becomes a
+        # last day and loses its evening. See async_get_energy_data.
         url = (
             f"{_PLAYBACK_BASE_URL}/{self.site_id}/{endpoint}"
             f"?resolution=hours"
