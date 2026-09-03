@@ -93,6 +93,17 @@ _ENERGY_UNIT_TO_WH = {"watt-hour": 1.0, "kilo-watt-hour": 1000.0, "mega-watt-hou
 _LIVE_POWER_URL = f"{_DASHBOARD_BASE_URL}/live-power/sites"
 _POWER_FLOW_URL = f"{_DASHBOARD_BASE_URL}/power-flow/v2/sites"
 
+# Informational endpoints whose payloads are passed through unchanged.
+_SITE_DETAILS_URL = f"{_DASHBOARD_BASE_URL}/site-details"
+_SITE_EQUIPMENT_URL = f"{_DASHBOARD_BASE_URL}/v2/site-details"
+_ENVIRONMENTAL_BENEFITS_URL = f"{_DASHBOARD_BASE_URL}/environmental-benefits/sites"
+_COMPARATIVE_ENERGY_URL = f"{_DASHBOARD_BASE_URL}/comparative-energy"
+_WEATHER_URL = f"{_DASHBOARD_BASE_URL}/weather/sites"
+_ALERTS_URL = f"{_DASHBOARD_BASE_URL}/alerts/sites"
+_STORAGE_DISTRIBUTION_URL = f"{_DASHBOARD_BASE_URL}/storage/energy/distribution/sites"
+
+_COMPARATIVE_PERIODS = ("monthly", "quarterly", "yearly")
+
 # Per-inverter energy totals and power series.
 _INVERTER_ENERGY_URL = f"{_DASHBOARD_BASE_URL}/inverters/energy/sites"
 _INVERTER_POWER_URL = f"{_DASHBOARD_BASE_URL}/inverters/power/sites"
@@ -1043,6 +1054,109 @@ class SolarEdgeWeb:
         url = f"{_INVERTER_POWER_URL}/{self.site_id}?{urlencode(params)}"
         resp_json = await self._async_get_json(url, "inverter power")
         return _decode_inverter_power(resp_json, serials)
+
+    async def async_get_site_details(self) -> dict[str, Any]:
+        """Get the site's name, address, owning account, peak power and status.
+
+        Returned as the API reports it. These payloads carry a long tail of
+        fields that vary by account type, so nothing is dropped by modelling
+        only the ones this client happens to know about.
+        """
+        await self.async_login()
+        url = f"{_SITE_DETAILS_URL}/{self.site_id}/details"
+        return await self._async_get_json(url, "site details")
+
+    async def async_get_site_equipment_summary(self) -> dict[str, Any]:
+        """Get counts and model names per equipment kind.
+
+        Covers inverters, optimizers, storage, meters, gateways, EV chargers
+        and more; kinds the site does not have are ``None``. Returned as the
+        API reports it.
+        """
+        await self.async_login()
+        url = f"{_SITE_EQUIPMENT_URL}/{self.site_id}/equipment"
+        return await self._async_get_json(url, "site equipment summary")
+
+    async def async_get_communication_status(self) -> dict[str, Any]:
+        """Get whether the site is currently reachable.
+
+        Returns ``connectivityStatus`` and ``active``.
+        """
+        await self.async_login()
+        url = f"{_SITE_DETAILS_URL}/{self.site_id}/communication"
+        return await self._async_get_json(url, "communication status")
+
+    async def async_get_environmental_benefits(self) -> dict[str, Any]:
+        """Get lifetime CO2 saved, equivalent trees planted and distance driven.
+
+        Units follow ``internationalSystemUnit`` in the payload, which is the
+        site's own metric/imperial setting.
+        """
+        await self.async_login()
+        url = f"{_ENVIRONMENTAL_BENEFITS_URL}/{self.site_id}"
+        return await self._async_get_json(url, "environmental benefits")
+
+    async def async_get_comparative_energy(self, period: str = "monthly") -> dict[str, Any]:
+        """Get production for the same period across years, in Wh.
+
+        ``period`` is ``monthly``, ``quarterly`` or ``yearly``. This is what
+        the site's year-on-year comparison chart is built from, so it reaches
+        back further than the energy endpoints allow in one request.
+        """
+        if period not in _COMPARATIVE_PERIODS:
+            msg = f"Unsupported period {period!r}; expected one of {', '.join(_COMPARATIVE_PERIODS)}"
+            raise ValueError(msg)
+
+        await self.async_login()
+        url = f"{_COMPARATIVE_ENERGY_URL}/{self.site_id}/{period}"
+        return await self._async_get_json(url, "comparative energy")
+
+    async def async_get_weather(self) -> dict[str, Any]:
+        """Get current conditions and the forecast for the site's location.
+
+        Returns ``liveWeather`` and ``weatherForecast``. Temperatures follow
+        the site's metric/imperial setting.
+        """
+        await self.async_login()
+        url = f"{_WEATHER_URL}/{self.site_id}/weather"
+        return await self._async_get_json(url, "weather")
+
+    async def async_get_alerts(self) -> dict[str, Any]:
+        """Get the site's open alerts.
+
+        Returns ``totalAlertsCount`` and ``topAlerts``.
+        """
+        await self.async_login()
+        url = f"{_ALERTS_URL}/{self.site_id}"
+        return await self._async_get_json(url, "alerts")
+
+    async def async_get_storage_energy_distribution(
+        self,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        resolution: str = "days",
+    ) -> dict[str, Any]:
+        """Get where battery energy came from and went, over a date range.
+
+        Returns ``sources`` (pv, grid, unknown) and ``destinations``
+        (building, grid, unknown), each with totals and percentages. All zero
+        on a site without storage.
+        """
+        if resolution not in _CONSUMPTION_RESOLUTIONS:
+            msg = f"Unsupported resolution {resolution!r}; expected one of {', '.join(_CONSUMPTION_RESOLUTIONS)}"
+            raise ValueError(msg)
+
+        await self.async_login()
+        end = (_as_naive(end_date) if end_date else datetime.now()).date()
+        start = _as_naive(start_date).date() if start_date else end - timedelta(days=7)
+
+        params = [
+            ("chart-time-unit", resolution),
+            ("start-date", start.isoformat()),
+            ("end-date", end.isoformat()),
+        ]
+        url = f"{_STORAGE_DISTRIBUTION_URL}/{self.site_id}?{urlencode(params)}"
+        return await self._async_get_json(url, "storage energy distribution")
 
     async def async_get_live_power(self) -> LivePower:
         """Get the site's current power. Values are in W.

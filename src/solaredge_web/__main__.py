@@ -13,7 +13,8 @@ It will:
 2. Fetch the equipment layout (inverters, strings, optimizers).
 3. Fetch hourly playback energy data for the last 7 days.
 4. Fetch consumption, measured energy totals, site energy and live power.
-5. Print a summary that you can compare against the SolarEdge web UI.
+5. Fetch per-optimizer live readings and maximum temperatures.
+6. Print a summary that you can compare against the SolarEdge web UI.
 """
 
 from __future__ import annotations
@@ -31,12 +32,21 @@ from typing import Any
 import aiohttp
 
 try:
-    from .solaredge import ConsumptionData, EnergyData, LivePower, SiteEnergyData, SolarEdgeWeb, _device_id
+    from .solaredge import (
+        ConsumptionData,
+        EnergyData,
+        LivePower,
+        OptimizerData,
+        SiteEnergyData,
+        SolarEdgeWeb,
+        _device_id,
+    )
 except ImportError:
     from solaredge import (  # type: ignore[no-redef,import-not-found]
         ConsumptionData,
         EnergyData,
         LivePower,
+        OptimizerData,
         SiteEnergyData,
         SolarEdgeWeb,
         _device_id,
@@ -153,6 +163,25 @@ def _print_site_energy(data: list[SiteEnergyData]) -> None:
         print(f"{_format_time(entry.start_time):<20} {_format_value(entry.energy):>12}")
 
 
+def _print_optimizers(
+    optimizers: dict[str, OptimizerData],
+    temperatures: dict[str, float],
+    equipment: dict[str, dict[str, Any]],
+) -> None:
+    """Print live readings and the day's peak temperature per optimizer."""
+    print("\n=== Optimizers ===")
+    print(f"{'Name':<20} {'Serial':<16} {'Power (W)':>10} {'V':>8} {'A':>7} {'Max C':>7}")
+    print("-" * 72)
+    for serial, optimizer in optimizers.items():
+        name = equipment.get(serial, {}).get("name", "?")
+        temperature = temperatures.get(serial)
+        print(
+            f"{name:<20} {serial:<16} {_format_value(optimizer.power):>10} "
+            f"{_format_value(optimizer.voltage):>8} {_format_value(optimizer.current):>7} "
+            f"{_format_value(temperature):>7}"
+        )
+
+
 def _print_live_power(live: LivePower) -> None:
     """Print the current site power."""
     print("\n=== Live Power ===")
@@ -228,6 +257,18 @@ async def async_main() -> None:
             _print_site_energy(await client.async_get_site_energy())
 
             _print_live_power(await client.async_get_live_power())
+
+            _print_optimizers(
+                await client.async_get_optimizer_data(),
+                await client.async_get_optimizer_temperatures(),
+                equipment,
+            )
+
+            print("\n=== Site Information ===")
+            information = await client.async_get_site_information()
+            print(f"  {information.get('peakPower')} kWp | timezone {information.get('siteTimeZone')}")
+            for serial, inverter in (await client.async_get_inverter_data()).items():
+                print(f"  [INVERTER] {serial} {inverter.model} | {inverter.status} | {inverter.power} W")
 
         except aiohttp.ClientError as err:
             print(f"\nAPI Error: {err}", file=sys.stderr)

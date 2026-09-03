@@ -1538,3 +1538,60 @@ def test_collect_inverter_serials_sorted_by_order():
         ],
     }
     assert _collect_inverter_serials(structure) == ["INV-A", "INV-B", "INV-C"]
+
+
+@pytest.mark.parametrize(
+    ("method_name", "expected_path"),
+    [
+        ("async_get_site_details", "services/dashboard/site-details/123/details"),
+        ("async_get_site_equipment_summary", "services/dashboard/v2/site-details/123/equipment"),
+        ("async_get_communication_status", "services/dashboard/site-details/123/communication"),
+        ("async_get_environmental_benefits", "services/dashboard/environmental-benefits/sites/123"),
+        ("async_get_weather", "services/dashboard/weather/sites/123/weather"),
+        ("async_get_alerts", "services/dashboard/alerts/sites/123"),
+    ],
+)
+async def test_informational_endpoints_pass_the_payload_through(method_name, expected_path):
+    """Each informational endpoint hits its URL and returns the payload as-is."""
+    payload = {"some": "value", "nested": {"count": 1}}
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=payload)])
+
+    client = _logged_in_client(session)
+    result = await getattr(client, method_name)()
+
+    assert result == payload
+    assert session.get.await_args_list[0].args[0].endswith(expected_path)
+
+
+async def test_async_get_comparative_energy_period():
+    """The period is part of the path and is validated."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data={"energyByYears": []})])
+
+    client = _logged_in_client(session)
+    await client.async_get_comparative_energy("yearly")
+
+    assert session.get.await_args_list[0].args[0].endswith("services/dashboard/comparative-energy/123/yearly")
+
+    with pytest.raises(ValueError, match="Unsupported period"):
+        await client.async_get_comparative_energy("weekly")
+
+
+async def test_async_get_storage_energy_distribution():
+    """Storage distribution takes a resolution and a date range."""
+    payload = {"destinations": {"total": 0.0}, "sources": {"total": 0.0}}
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=payload)])
+
+    client = _logged_in_client(session)
+    result = await client.async_get_storage_energy_distribution(datetime(2026, 7, 24), datetime(2026, 7, 30))
+
+    assert result == payload
+    url = session.get.await_args_list[0].args[0]
+    assert "services/dashboard/storage/energy/distribution/sites/123" in url
+    assert "chart-time-unit=days" in url
+    assert "start-date=2026-07-24" in url
+
+    with pytest.raises(ValueError, match="Unsupported resolution"):
+        await client.async_get_storage_energy_distribution(resolution="weeks")

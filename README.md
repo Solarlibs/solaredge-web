@@ -12,39 +12,66 @@ from solaredge_web import SolarEdgeWeb
 async with aiohttp.ClientSession() as session:
     client = SolarEdgeWeb(username, password, site_id, session)
 
-    # Which features the site has, e.g. hasConsumptionAndGrid, hasStorage.
-    components = await client.async_get_site_components()
+    # --- site facts (all cached until the next login) ---
+    equipment = await client.async_get_equipment()          # inverters, strings, optimizers
+    components = await client.async_get_site_components()   # hasConsumptionAndGrid, hasStorage, ...
+    information = await client.async_get_site_information()  # peakPower, siteTimeZone, ...
     availability = await client.async_get_data_availability()
+    details = await client.async_get_site_details()
+    summary = await client.async_get_site_equipment_summary()
+    communication = await client.async_get_communication_status()
 
-    # Inverters, strings and optimizers, keyed by serial.
-    equipment = await client.async_get_equipment()
-
-    # Hourly energy per optimizer/string/inverter/site, derived from playback power.
+    # --- energy ---
+    # Hourly per optimizer/string/inverter/site, derived from playback power.
     energy = await client.async_get_energy_data()
-
-    # Measured energy totals per device over a date range, no time series.
+    # Measured totals per device over a date range, no time series.
     totals = await client.async_get_energy_totals()
-
-    # Site-level production and consumption. resolution is one of
-    # quarter-hours, hours, days, months, years.
-    consumption = await client.async_get_consumption_data(resolution="hours")
-
-    # Measured site-level energy per slot: hours, days, months or years.
+    # Measured site energy per slot: hours, days, months or years.
     site_energy = await client.async_get_site_energy(resolution="days")
+    site_total = await client.async_get_site_energy_total()
+    # Measured energy per slot for specific optimizers (one request per optimizer).
+    optimizer_energy = await client.async_get_optimizer_energy(["7A012345-CA"])
+    inverter_energy = await client.async_get_inverter_energy_totals()
+    comparative = await client.async_get_comparative_energy("monthly")
 
-    # Current power.
+    # --- production and consumption ---
+    # quarter-hours, hours, days, months or years.
+    consumption = await client.async_get_consumption_data(resolution="hours")
+    storage = await client.async_get_storage_energy_distribution()
+
+    # --- power ---
     live = await client.async_get_live_power()
+    site_power = await client.async_get_site_power()
+    inverter_power = await client.async_get_inverter_power()
+
+    # --- per-device diagnostics ---
+    optimizers = await client.async_get_optimizer_data()   # live W, V, A per optimizer
+    inverters = await client.async_get_inverter_data()     # live readings and firmware
+    temperatures = await client.async_get_optimizer_temperatures()  # max degrees C
+
+    # --- everything else ---
+    weather = await client.async_get_weather()
+    benefits = await client.async_get_environmental_benefits()
+    alerts = await client.async_get_alerts()
 ```
 
-All energy values are in Wh and all power values are in W. Timestamps are naive
-`datetime`s in the site's local time.
+All energy values are in Wh, power in W, temperatures in degrees Celsius.
 
-Consumption, grid import and grid export require a consumption meter: without one
-(`hasConsumptionAndGrid` is false) those fields are `None` rather than zero.
+Timestamps are naive `datetime`s in the site's local time, whose IANA name is
+`siteTimeZone` from `async_get_site_information`. The one exception is
+`last_measurement` on `OptimizerData` and `InverterData`, which is an aware UTC
+datetime because those endpoints report a real UTC instant.
 
-Each resolution has its own range limit, and the API answers HTTP 400 beyond it.
-The library warns before making such a request; see the method docstrings for
-the limits.
+Consumption, grid import and grid export require a consumption meter: without
+one (`hasConsumptionAndGrid` is false) those fields are `None` rather than zero.
+
+Each resolution has its own range limit, and the API answers HTTP 400 beyond
+it. The library warns before making such a request; see the method docstrings
+for the limits.
+
+Endpoints that report a payload with no fixed shape - site details, weather,
+alerts and similar - are returned as-is rather than modelled, since their
+fields vary by account type, storage and metering.
 
 ## Development environment
 
