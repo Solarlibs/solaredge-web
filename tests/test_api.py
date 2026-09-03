@@ -15,6 +15,7 @@ import pytest
 from solaredge_web import SolarEdgeWeb
 from solaredge_web.solaredge import (
     _build_opt_to_parent_map,
+    _decode_dashboard_measurements,
     _decode_playback,
     _decode_playback_verbose,
     _to_utc_iso,
@@ -734,3 +735,232 @@ async def test_async_get_site_components_http_error():
     client = _logged_in_client(session)
     with pytest.raises(aiohttp.ClientResponseError):
         await client.async_get_site_components()
+
+
+async def test_async_get_consumption_data_hourly_converts_watts_to_wh():
+    """Hourly slots come from the power endpoint in W and are returned in Wh."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("site_components.json")),
+            _mock_response(json_data=_load_fixture("dashboard_power_hours.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    data = await client.async_get_consumption_data(datetime(2026, 7, 30), datetime(2026, 7, 30))
+
+    assert len(data) == 8
+    # Naive site-local slot times, one hour apart.
+    assert data[0].start_time == datetime(2026, 7, 30, 0, 0)
+    assert data[5].start_time == datetime(2026, 7, 30, 5, 0)
+    # 1-hour slots, so Wh equals the reported watts.
+    assert data[5].production == 1500.0
+    assert data[5].consumption == 600.0
+    assert data[5].self_consumption == 600.0
+    assert data[5].exported == 900.0
+    assert data[5].consumption_from_grid == 0.0
+
+
+async def test_async_get_consumption_data_quarter_hours_scales_by_slot():
+    """Quarter-hour slots are a quarter of an hour long, so Wh = W / 4."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("site_components.json")),
+            _mock_response(json_data=_load_fixture("dashboard_power_hours.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    data = await client.async_get_consumption_data(datetime(2026, 7, 30), datetime(2026, 7, 30), resolution="quarter-hours")
+
+    assert data[5].production == 375.0
+    assert data[5].consumption == 150.0
+
+
+async def test_async_get_consumption_data_daily_uses_energy_endpoint():
+    """Daily data is already in Wh and is read from chart.measurements."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("site_components.json")),
+            _mock_response(json_data=_load_fixture("dashboard_energy_days.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    data = await client.async_get_consumption_data(datetime(2026, 7, 28), datetime(2026, 7, 30), resolution="days")
+
+    url = session.get.await_args_list[1].args[0]
+    assert "services/dashboard/energy/sites/123" in url
+    assert "chart-time-unit=days" in url
+    assert len(data) == 3
+    assert data[0].start_time == datetime(2026, 7, 28)
+    assert data[0].production == 34279.0
+    assert data[0].consumption == 21500.0
+
+
+async def test_async_get_consumption_data_url_and_measurement_types():
+    """URL carries plain dates, the time unit, and repeated measurement-types."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("site_components.json")),
+            _mock_response(json_data=_load_fixture("dashboard_power_hours.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    await client.async_get_consumption_data(datetime(2026, 7, 24), datetime(2026, 7, 30))
+
+    url = session.get.await_args_list[1].args[0]
+    assert "services/dashboard/power/sites/123" in url
+    assert "chart-time-unit=hours" in url
+    assert "start-date=2026-07-24" in url
+    assert "end-date=2026-07-30" in url
+    assert "measurement-types=production" in url
+    assert "measurement-types=consumption" in url
+    assert "measurement-types=import" in url
+    assert "measurement-types=export" in url
+    # No storage on this site, so the without-storage breakdown is requested.
+    assert "consumption-distribution-without-storage" in url
+    assert "with-storage" not in url.replace("without-storage", "")
+
+
+async def test_async_get_consumption_data_requests_storage_breakdown():
+    """Sites with a battery ask for the with-storage distributions."""
+    components = dict(_load_fixture("site_components.json"), hasStorage=True)
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=components),
+            _mock_response(json_data=_load_fixture("dashboard_power_hours.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    await client.async_get_consumption_data(datetime(2026, 7, 30), datetime(2026, 7, 30))
+
+    url = session.get.await_args_list[1].args[0]
+    assert "consumption-distribution-with-storage" in url
+    assert "production-distribution-with-storage" in url
+    assert "without-storage" not in url
+
+
+async def test_async_get_consumption_data_without_meter_keeps_none():
+    """A site with no consumption meter reports None, never zero."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("site_components_no_meter.json")),
+            _mock_response(json_data=_load_fixture("dashboard_power_no_meter.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    data = await client.async_get_consumption_data(datetime(2026, 7, 30), datetime(2026, 7, 30))
+
+    assert data[5].production == 1500.0
+    assert data[5].consumption is None
+    assert data[5].imported is None
+    assert data[5].exported is None
+    assert data[5].self_consumption is None
+
+
+async def test_async_get_consumption_data_defaults_to_last_7_days():
+    """Without dates the range is the last 7 days in the site's local time."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("site_components.json")),
+            _mock_response(json_data=_load_fixture("dashboard_power_hours.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    await client.async_get_consumption_data()
+
+    url = session.get.await_args_list[1].args[0]
+    today = datetime.now().date()
+    assert f"start-date={today - timedelta(days=7)}" in url
+    assert f"end-date={today}" in url
+
+
+async def test_async_get_consumption_data_warns_on_too_wide_range(caplog):
+    """A range wider than the API allows is flagged before the request."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("site_components.json")),
+            _mock_response(json_data=_load_fixture("dashboard_power_hours.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    with caplog.at_level(logging.WARNING):
+        await client.async_get_consumption_data(datetime(2026, 7, 1), datetime(2026, 7, 30), resolution="quarter-hours")
+
+    assert "wider than the 7 days" in caplog.text
+
+
+async def test_async_get_consumption_data_rejects_unknown_resolution():
+    """An unsupported resolution fails before any request is made."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock()
+
+    client = _logged_in_client(session)
+    with pytest.raises(ValueError, match="Unsupported resolution"):
+        await client.async_get_consumption_data(resolution="weeks")
+
+    session.get.assert_not_awaited()
+
+
+async def test_async_get_consumption_data_bad_arguments_propagates():
+    """A BAD_ARGUMENTS 400 surfaces as a ClientResponseError."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("site_components.json")),
+            _mock_failing_response(status=400),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    with pytest.raises(aiohttp.ClientResponseError):
+        await client.async_get_consumption_data()
+
+
+async def test_async_get_consumption_data_empty_response(caplog):
+    """An empty payload returns an empty list and warns."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("site_components.json")),
+            _mock_response(json_data={"measurements": []}),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    with caplog.at_level(logging.WARNING):
+        data = await client.async_get_consumption_data()
+
+    assert data == []
+    assert "No measurements returned" in caplog.text
+
+
+def test_decode_dashboard_measurements_skips_invalid_entries():
+    """Entries without a usable timestamp are dropped, not fatal."""
+    measurements = [
+        {"measurementTime": None, "production": 10.0},
+        {"measurementTime": "not-a-date", "production": 10.0},
+        {"measurementTime": "2026-07-30T01:00:00-07:00", "production": "bogus", "consumption": 20.0},
+        {"measurementTime": "2026-07-30T02:00:00-07:00", "production": 30.0},
+    ]
+
+    data = _decode_dashboard_measurements(measurements, 1.0)
+
+    assert [d.start_time for d in data] == [datetime(2026, 7, 30, 1, 0), datetime(2026, 7, 30, 2, 0)]
+    assert data[0].production is None
+    assert data[0].consumption == 20.0
+    assert data[1].production == 30.0

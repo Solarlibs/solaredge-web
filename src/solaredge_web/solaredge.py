@@ -12,7 +12,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, NoReturn
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import aiohttp
 
@@ -53,6 +53,32 @@ _PLAYBACK_VERBOSE = "optimizers"
 # Both playback endpoints reject a range wider than this with BAD_ARGUMENTS.
 _MAX_PLAYBACK_SPAN = timedelta(days=8)
 
+# Site-level production/consumption. The power endpoint answers in watts and
+# serves sub-daily slots; the energy endpoint answers in watt-hours and serves
+# daily and coarser slots. They share the same measurement shape.
+_SITE_POWER_URL = f"{_DASHBOARD_BASE_URL}/power/sites"
+_SITE_ENERGY_URL = f"{_DASHBOARD_BASE_URL}/energy/sites"
+
+# Accepted chart-time-unit values, mapped to the hours one slot covers.
+# Only the first two are valid for the power endpoint, only the rest for the
+# energy one; "hours" is rejected by the energy endpoint.
+_SLOT_HOURS = {
+    "quarter-hours": 0.25,
+    "hours": 1.0,
+    "days": 24.0,
+    "months": None,
+    "years": None,
+}
+_POWER_RESOLUTIONS = ("quarter-hours", "hours")
+
+# Widest span each resolution accepts before answering BAD_ARGUMENTS. Measured
+# against the live API; months and years are far wider than anyone asks for.
+_MAX_CONSUMPTION_SPAN = {
+    "quarter-hours": timedelta(days=7),
+    "hours": timedelta(days=31),
+    "days": timedelta(days=99),
+}
+
 
 def _raise_login_error(
     resp: aiohttp.ClientResponse,
@@ -91,6 +117,30 @@ class EnergyData:
 
     start_time: datetime
     values: dict[str, float]
+
+
+@dataclasses.dataclass
+class ConsumptionData:
+    """Site-level energy for a single time slot. Values are in Wh.
+
+    start_time is naive and expressed in the site's local time, matching
+    :class:`EnergyData`.
+
+    A value is ``None`` when the site cannot measure it. Sites without a
+    consumption meter (``hasConsumptionAndGrid`` is false in
+    :meth:`SolarEdgeWeb.async_get_site_components`) only report production;
+    everything else stays ``None`` rather than being reported as zero.
+    """
+
+    start_time: datetime
+    production: float | None = None
+    consumption: float | None = None
+    imported: float | None = None
+    exported: float | None = None
+    self_consumption: float | None = None
+    consumption_from_grid: float | None = None
+    production_to_home: float | None = None
+    production_to_grid: float | None = None
 
 
 class SolarEdgeWeb:
@@ -404,6 +454,78 @@ class SolarEdgeWeb:
         )
         return await self._async_get_json(url, "energy data")
 
+    async def async_get_consumption_data(
+        self,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        resolution: str = "hours",
+    ) -> list[ConsumptionData]:
+        """Get site-level production and consumption. Values are in Wh.
+
+        ``resolution`` is one of ``quarter-hours``, ``hours``, ``days``,
+        ``months`` or ``years``. Sub-daily resolutions come from the power
+        endpoint in watts and are converted to Wh by multiplying by the slot
+        duration, the same way :meth:`async_get_energy_data` converts playback
+        data, so hourly slots from both methods line up. Daily and coarser
+        resolutions are reported by the API in Wh already.
+
+        If start_date/end_date are not provided, defaults to the last 7 days up
+        to today, in the site's local time. The API rejects wider ranges with
+        HTTP 400: 7 days for ``quarter-hours``, 31 days for ``hours`` and
+        99 days for ``days``.
+
+        Consumption, import and export are ``None`` unless the site has a
+        consumption meter; see :meth:`async_get_site_components`.
+        """
+        if resolution not in _SLOT_HOURS:
+            msg = f"Unsupported resolution {resolution!r}; expected one of {', '.join(_SLOT_HOURS)}"
+            raise ValueError(msg)
+
+        components = await self.async_get_site_components()
+
+        # The API takes plain dates and reads them in the site's timezone.
+        end = (_as_naive(end_date) if end_date else datetime.now()).date()
+        start = _as_naive(start_date).date() if start_date else end - timedelta(days=7)
+        max_span = _MAX_CONSUMPTION_SPAN.get(resolution)
+        if max_span is not None and end - start > max_span:
+            _LOGGER.warning(
+                "Requested range %s..%s is wider than the %s days the API allows for %s; expect HTTP 400",
+                start,
+                end,
+                max_span.days,
+                resolution,
+            )
+
+        is_power = resolution in _POWER_RESOLUTIONS
+        base_url = _SITE_POWER_URL if is_power else _SITE_ENERGY_URL
+        params = [
+            ("chart-time-unit", resolution),
+            ("start-date", start.isoformat()),
+            ("end-date", end.isoformat()),
+            *[("measurement-types", t) for t in _measurement_types(bool(components.get("hasStorage")))],
+        ]
+        url = f"{base_url}/{self.site_id}?{urlencode(params)}"
+
+        _LOGGER.debug(
+            "Fetching %s consumption data for site: %s (%s..%s)",
+            resolution,
+            self.site_id,
+            start,
+            end,
+        )
+        resp_json = await self._async_get_json(url, "consumption data")
+
+        # The power endpoint returns the measurements at the top level; the
+        # energy endpoint nests them under "chart" next to a summary.
+        if is_power:
+            measurements = resp_json.get("measurements", [])
+            # Watts over a slot of known length; Wh = W * hours.
+            scale = _SLOT_HOURS[resolution] or 1.0
+        else:
+            measurements = resp_json.get("chart", {}).get("measurements", [])
+            scale = 1.0
+        return _decode_dashboard_measurements(measurements, scale)
+
     async def _async_get_json(self, url: str, description: str) -> dict[str, Any]:
         """GET a monitoring API endpoint and return the decoded JSON body.
 
@@ -624,6 +746,75 @@ def _decode_playback(
     return energy_data_list
 
 
+def _measurement_types(has_storage: bool) -> list[str]:
+    """Return the measurement-types the web app asks for on this kind of site.
+
+    The distribution breakdowns come in with-storage and without-storage
+    flavors; asking for the wrong one loses the battery legs.
+    """
+    suffix = "with-storage" if has_storage else "without-storage"
+    return [
+        "production",
+        "consumption",
+        "import",
+        "export",
+        f"production-distribution-{suffix}",
+        f"consumption-distribution-{suffix}",
+    ]
+
+
+def _as_float(value: Any, scale: float = 1.0) -> float | None:
+    """Convert an API value to a float, keeping None (unmeasured) as None."""
+    if value is None:
+        return None
+    try:
+        return float(value) * scale
+    except (TypeError, ValueError):
+        return None
+
+
+def _decode_dashboard_measurements(measurements: list[dict[str, Any]], scale: float) -> list[ConsumptionData]:
+    """Decode dashboard power/energy measurements into ConsumptionData.
+
+    ``scale`` converts a raw value into Wh: the slot length in hours for the
+    power endpoint (which answers in watts), 1.0 for the energy endpoint.
+    """
+    if not measurements:
+        _LOGGER.warning("No measurements returned in dashboard response.")
+        return []
+
+    result: list[ConsumptionData] = []
+    for measurement in measurements:
+        raw_time = measurement.get("measurementTime")
+        if not raw_time:
+            continue
+        try:
+            # The offset is the site's, so dropping it yields site-local time.
+            slot_time = _as_naive(datetime.fromisoformat(raw_time))
+        except (TypeError, ValueError):
+            _LOGGER.warning("Skipping measurement with invalid time: %r", raw_time)
+            continue
+
+        production_distribution = measurement.get("productionDistribution") or {}
+        consumption_distribution = measurement.get("consumptionDistribution") or {}
+        result.append(
+            ConsumptionData(
+                start_time=slot_time,
+                production=_as_float(measurement.get("production"), scale),
+                consumption=_as_float(measurement.get("consumption"), scale),
+                imported=_as_float(measurement.get("import"), scale),
+                exported=_as_float(measurement.get("export"), scale),
+                self_consumption=_as_float(consumption_distribution.get("consumptionFromSolar"), scale),
+                consumption_from_grid=_as_float(consumption_distribution.get("consumptionFromGrid"), scale),
+                production_to_home=_as_float(production_distribution.get("productionToHome"), scale),
+                production_to_grid=_as_float(production_distribution.get("productionToGrid"), scale),
+            )
+        )
+
+    _LOGGER.debug("Decoded %s dashboard measurements.", len(result))
+    return result
+
+
 def _extract_utc_offset(resp_json: dict[str, Any]) -> timedelta | None:
     """Read the site's UTC offset from the first dated measurement, if any."""
     for entry in resp_json.get("optimizerPowerMeasurementsList", []):
@@ -697,6 +888,7 @@ def _decode_playback_verbose(
 
 
 __all__ = [
+    "ConsumptionData",
     "EnergyData",
     "SolarEdgeWeb",
 ]

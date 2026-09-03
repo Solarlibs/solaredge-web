@@ -1,0 +1,144 @@
+{
+    "measurements": [
+        {
+            "measurementTime": "2026-07-30T00:00:00-07:00",
+            "production": null,
+            "productionDistribution": null,
+            "consumption": 300.0,
+            "consumptionDistribution": {
+                "consumptionFromSolar": null,
+                "consumptionFromGrid": null,
+                "estimated": false
+            },
+            "storageLevel": null,
+            "weatherDescription": "Mostly Clear",
+            "export": null,
+            "import": null
+        },
+        {
+            "measurementTime": "2026-07-30T01:00:00-07:00",
+            "production": null,
+            "productionDistribution": null,
+            "consumption": 280.0,
+            "consumptionDistribution": {
+                "consumptionFromSolar": null,
+                "consumptionFromGrid": null,
+                "estimated": false
+            },
+            "storageLevel": null,
+            "weatherDescription": "Mostly Clear",
+            "export": null,
+            "import": null
+        },
+        {
+            "measurementTime": "2026-07-30T02:00:00-07:00",
+            "production": null,
+            "productionDistribution": null,
+            "consumption": 310.0,
+            "consumptionDistribution": {
+                "consumptionFromSolar": null,
+                "consumptionFromGrid": null,
+                "estimated": false
+            },
+            "storageLevel": null,
+            "weatherDescription": "Mostly Clear",
+            "export": null,
+            "import": null
+        },
+        {
+            "measurementTime": "2026-07-30T03:00:00-07:00",
+            "production": 0.0,
+            "productionDistribution": {
+                "productionToHome": 0.0,
+                "productionToGrid": 0.0,
+                "estimated": false
+            },
+            "consumption": 450.0,
+            "consumptionDistribution": {
+                "consumptionFromSolar": 0.0,
+                "consumptionFromGrid": 450.0,
+                "estimated": false
+            },
+            "storageLevel": null,
+            "weatherDescription": "Mostly Clear",
+            "export": 0.0,
+            "import": 450.0
+        },
+        {
+            "measurementTime": "2026-07-30T04:00:00-07:00",
+            "production": 120.5,
+            "productionDistribution": {
+                "productionToHome": 120.5,
+                "productionToGrid": 0.0,
+                "estimated": false
+            },
+            "consumption": 500.0,
+            "consumptionDistribution": {
+                "consumptionFromSolar": 120.5,
+                "consumptionFromGrid": 379.5,
+                "estimated": false
+            },
+            "storageLevel": null,
+            "weatherDescription": "Mostly Clear",
+            "export": 0.0,
+            "import": 379.5
+        },
+        {
+            "measurementTime": "2026-07-30T05:00:00-07:00",
+            "production": 1500.0,
+            "productionDistribution": {
+                "productionToHome": 600.0,
+                "productionToGrid": 900.0,
+                "estimated": false
+            },
+            "consumption": 600.0,
+            "consumptionDistribution": {
+                "consumptionFromSolar": 600.0,
+                "consumptionFromGrid": 0.0,
+                "estimated": false
+            },
+            "storageLevel": null,
+            "weatherDescription": "Mostly Clear",
+            "export": 900.0,
+            "import": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T06:00:00-07:00",
+            "production": 3200.0,
+            "productionDistribution": {
+                "productionToHome": 900.0,
+                "productionToGrid": 2300.0,
+                "estimated": false
+            },
+            "consumption": 900.0,
+            "consumptionDistribution": {
+                "consumptionFromSolar": 900.0,
+                "consumptionFromGrid": 0.0,
+                "estimated": false
+            },
+            "storageLevel": null,
+            "weatherDescription": "Mostly Clear",
+            "export": 2300.0,
+            "import": 0.0
+        },
+        {
+            "measurementTime": "2026-07-30T07:00:00-07:00",
+            "production": 2000.0,
+            "productionDistribution": {
+                "productionToHome": 1200.0,
+                "productionToGrid": 800.0,
+                "estimated": false
+            },
+            "consumption": 1200.0,
+            "consumptionDistribution": {
+                "consumptionFromSolar": 1200.0,
+                "consumptionFromGrid": 0.0,
+                "estimated": false
+            },
+            "storageLevel": null,
+            "weatherDescription": "Mostly Clear",
+            "export": 800.0,
+            "import": 0.0
+        }
+    ]
+}

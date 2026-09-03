@@ -1,0 +1,68 @@
+{
+    "summary": {
+        "production": 112394.0,
+        "consumption": 65610.0,
+        "selfConsumptionRatio": 41.2,
+        "selfSufficiencyRatio": 62.8,
+        "export": 73028.0,
+        "import": 26244.0
+    },
+    "chart": {
+        "measurements": [
+            {
+                "measurementTime": "2026-07-28T00:00:00-07:00",
+                "production": 34279.0,
+                "productionDistribution": {
+                    "productionToHome": 12900.0,
+                    "productionToGrid": 21379.0,
+                    "estimated": false
+                },
+                "consumption": 21500.0,
+                "consumptionDistribution": {
+                    "consumptionFromSolar": 12900.0,
+                    "consumptionFromGrid": 8600.0,
+                    "estimated": false
+                },
+                "weatherDescription": null,
+                "export": 21379.0,
+                "import": 8600.0
+            },
+            {
+                "measurementTime": "2026-07-29T00:00:00-07:00",
+                "production": 25473.0,
+                "productionDistribution": {
+                    "productionToHome": 11880.0,
+                    "productionToGrid": 13593.0,
+                    "estimated": false
+                },
+                "consumption": 19800.0,
+                "consumptionDistribution": {
+                    "consumptionFromSolar": 11880.0,
+                    "consumptionFromGrid": 7920.0,
+                    "estimated": false
+                },
+                "weatherDescription": null,
+                "export": 13593.0,
+                "import": 7920.0
+            },
+            {
+                "measurementTime": "2026-07-30T00:00:00-07:00",
+                "production": 52642.0,
+                "productionDistribution": {
+                    "productionToHome": 14586.0,
+                    "productionToGrid": 38056.0,
+                    "estimated": false
+                },
+                "consumption": 24310.0,
+                "consumptionDistribution": {
+                    "consumptionFromSolar": 14586.0,
+                    "consumptionFromGrid": 9724.0,
+                    "estimated": false
+                },
+                "weatherDescription": null,
+                "export": 38056.0,
+                "import": 9724.0
+            }
+        ]
+    }
+}
