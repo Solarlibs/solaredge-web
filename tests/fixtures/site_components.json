@@ -1,0 +1,21 @@
+{
+    "viewerType": "installer",
+    "siteType": "residential",
+    "hasStorage": false,
+    "hasConsumptionAndGrid": true,
+    "hasPerformanceRatio": false,
+    "hasSmartDevices": false,
+    "hasEVChargers": false,
+    "hasBillingCycleProgram": false,
+    "showInverterGraph": false,
+    "canNormalizeData": false,
+    "canNormalizeInvertersData": false,
+    "canEditBillingPeriod": true,
+    "hasCommercialPerformanceRatio": false,
+    "internationalSystemUnits": "METRIC",
+    "inverterCount": 1,
+    "hasProduction": true,
+    "hasGenerator": false,
+    "hasAcStorage": false,
+    "hasDcStorage": false
+}

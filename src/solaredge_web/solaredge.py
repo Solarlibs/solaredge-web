@@ -40,7 +40,10 @@ _SESSION_COOKIE_NAME = "se_monitoring_auth"
 # Refresh SSO session at most every hour to avoid re-issuing the OAuth flow.
 _LOGIN_REFRESH_SECONDS = 3600
 
-_PLAYBACK_BASE_URL = "https://monitoring.solaredge.com/services/layout/playback/site"
+_LAYOUT_BASE_URL = "https://monitoring.solaredge.com/services/layout"
+_DASHBOARD_BASE_URL = "https://monitoring.solaredge.com/services/dashboard"
+
+_PLAYBACK_BASE_URL = f"{_LAYOUT_BASE_URL}/playback/site"
 # The compact endpoint returns a packed array; the verbose one returns explicit
 # per-measurement timestamps. They disagree on how the date range is read, see
 # ``_async_fetch_playback``.
@@ -109,6 +112,7 @@ class SolarEdgeWeb:
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self._equipment: dict[str, dict[str, Any]] = {}
         self._site_structure: dict[str, Any] = {}
+        self._site_components: dict[str, Any] = {}
         self._last_login_time = 0.0
         self._auth_headers: dict[str, str] = {}
         self._site_utc_offset: timedelta | None = None
@@ -188,6 +192,7 @@ class SolarEdgeWeb:
         self._auth_headers = auth_headers
         self._equipment = {}
         self._site_structure = {}
+        self._site_components = {}
         self._last_login_time = time.time()
         _LOGGER.debug("Successfully completed OAuth2 login flow.")
 
@@ -258,18 +263,8 @@ class SolarEdgeWeb:
             return self._equipment if include_inactive else _exclude_inactive(self._equipment)
 
         _LOGGER.debug("Fetching equipment for site: %s", self.site_id)
-        url = (
-            f"https://monitoring.solaredge.com/services/layout/logical/generic/v2/site/{self.site_id}?include-optimizers=true"
-        )
-        try:
-            resp = await self.session.get(url, headers=self._auth_headers, timeout=self.timeout)
-            _LOGGER.debug("Got %s from %s", resp.status, url)
-            resp.raise_for_status()
-        except aiohttp.ClientError:
-            _LOGGER.exception("Error fetching equipment from %s", url)
-            raise
-
-        resp_json = await resp.json()
+        url = f"{_LAYOUT_BASE_URL}/logical/generic/v2/site/{self.site_id}?include-optimizers=true"
+        resp_json = await self._async_get_json(url, "equipment")
         self._site_structure = resp_json.get("siteStructure", {})
 
         def extract_nested(node: dict[str, Any], data_dict: dict[str, dict[str, Any]]) -> None:
@@ -287,6 +282,36 @@ class SolarEdgeWeb:
             extract_nested(self._site_structure, self._equipment)
         _LOGGER.debug("Found %s equipment for site: %s", len(self._equipment), self.site_id)
         return self._equipment if include_inactive else _exclude_inactive(self._equipment)
+
+    async def async_get_site_components(self) -> dict[str, Any]:
+        """Get which features the site has. Cached until the next login.
+
+        Useful keys: ``hasConsumptionAndGrid`` (a consumption/import-export
+        meter is installed), ``hasStorage``, ``hasProduction``, ``siteType``
+        and ``inverterCount``. Without a consumption meter every consumption
+        value returned by :meth:`async_get_consumption_data` is ``None``.
+        """
+        await self.async_login()
+        if self._site_components:
+            _LOGGER.debug("Using cached site components for site: %s", self.site_id)
+            return self._site_components
+
+        _LOGGER.debug("Fetching site components for site: %s", self.site_id)
+        url = f"{_DASHBOARD_BASE_URL}/site-details/{self.site_id}/components"
+        self._site_components = await self._async_get_json(url, "site components")
+        return self._site_components
+
+    async def async_get_data_availability(self) -> dict[str, Any]:
+        """Get the date range the site has data for.
+
+        Returns ``productionDataAvailableFrom``, ``consumptionDataAvailableFrom``
+        (``None`` without a consumption meter), ``productionDataAvailableUntil``
+        and ``lastUpdateTime``. Dates are in the site's local timezone.
+        """
+        await self.async_login()
+        _LOGGER.debug("Fetching data availability for site: %s", self.site_id)
+        url = f"{_DASHBOARD_BASE_URL}/data-availability/sites/{self.site_id}"
+        return await self._async_get_json(url, "data availability")
 
     async def async_get_energy_data(
         self,
@@ -372,23 +397,32 @@ class SolarEdgeWeb:
 
     async def _async_fetch_playback(self, endpoint: str, start_date: datetime, end_date: datetime) -> dict[str, Any]:
         """Fetch a playback response for the given endpoint and date range."""
-        headers = dict(self._auth_headers)
-        csrf_token_cookie = self._find_cookie("CSRF-TOKEN")
-        if csrf_token_cookie and csrf_token_cookie.value:
-            headers["X-CSRF-TOKEN"] = csrf_token_cookie.value
-
         url = (
             f"{_PLAYBACK_BASE_URL}/{self.site_id}/{endpoint}"
             f"?resolution=hours"
             f"&start-date={_to_utc_iso(start_date)}&end-date={_to_utc_iso(end_date)}"
         )
+        return await self._async_get_json(url, "energy data")
+
+    async def _async_get_json(self, url: str, description: str) -> dict[str, Any]:
+        """GET a monitoring API endpoint and return the decoded JSON body.
+
+        Sends the bearer token from the last login plus the CSRF token the
+        backend hands out as a cookie; endpoints behind the API gateway reject
+        the request without it.
+        """
+        headers = dict(self._auth_headers)
+        csrf_token_cookie = self._find_cookie("CSRF-TOKEN")
+        if csrf_token_cookie and csrf_token_cookie.value:
+            headers["X-CSRF-TOKEN"] = csrf_token_cookie.value
+
         try:
             resp = await self.session.get(url, headers=headers, timeout=self.timeout)
             _LOGGER.debug("Got %s from %s", resp.status, url)
             resp.raise_for_status()
             resp_json: dict[str, Any] = await resp.json()
         except aiohttp.ClientError:
-            _LOGGER.exception("Error fetching energy data from %s", url)
+            _LOGGER.exception("Error fetching %s from %s", description, url)
             raise
         return resp_json
 

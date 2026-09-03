@@ -643,3 +643,94 @@ async def test_login_is_reused_and_cache_survives(caplog):
     # One layout fetch, no OAuth traffic, cache intact across the extra login.
     assert session.get.await_count == 1
     session.post.assert_not_awaited()
+
+
+def _logged_in_client(session, site_id="123"):
+    """Build a client that skips the OAuth flow because the session is valid."""
+    client = SolarEdgeWeb("u", "p", site_id, session, timeout=5)
+    client._last_login_time = 1e12
+    client._auth_headers = {"Authorization": "Bearer test"}
+    return client
+
+
+async def test_async_get_site_components_is_cached():
+    """Site components are fetched once and reused."""
+    components = _load_fixture("site_components.json")
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=components)])
+
+    client = _logged_in_client(session)
+    first = await client.async_get_site_components()
+    second = await client.async_get_site_components()
+
+    assert first["hasConsumptionAndGrid"] is True
+    assert second == first
+    assert session.get.await_count == 1
+    url = session.get.await_args_list[0].args[0]
+    assert url.endswith("services/dashboard/site-details/123/components")
+
+
+async def test_async_get_site_components_cache_cleared_by_login():
+    """A fresh login drops the cached components."""
+    components = _load_fixture("site_components.json")
+    auth_resp = _mock_response(url="https://monitoring.solaredge.com/mfe/auth/callback?code=test_code")
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[_mock_response(json_data=components), auth_resp, _mock_response(json_data=components)]
+    )
+    session.post = AsyncMock(
+        side_effect=[
+            _mock_response(json_data={"access_token": "test_token"}),
+            _mock_response(json_data={"ok": True}),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    await client.async_get_site_components()
+    client._last_login_time = 0.0
+    client._auth_headers = {}
+    await client.async_get_site_components()
+
+    assert session.get.await_count == 3
+
+
+async def test_async_get_data_availability():
+    """Data availability is returned as-is and is not cached."""
+    availability = _load_fixture("data_availability.json")
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=availability)] * 2)
+
+    client = _logged_in_client(session)
+    result = await client.async_get_data_availability()
+    await client.async_get_data_availability()
+
+    assert result["consumptionDataAvailableFrom"] == "2023-04-01"
+    assert session.get.await_count == 2
+    url = session.get.await_args_list[0].args[0]
+    assert url.endswith("services/dashboard/data-availability/sites/123")
+
+
+async def test_async_get_site_components_sends_auth_and_csrf_headers():
+    """Dashboard requests carry the bearer token and the CSRF cookie value."""
+    components = _load_fixture("site_components.json")
+    session = _make_mock_session(
+        cookies=[_make_cookie("se_monitoring_auth", "session_value"), _make_cookie("CSRF-TOKEN", "csrf-value-123")]
+    )
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=components)])
+
+    client = _logged_in_client(session)
+    await client.async_get_site_components()
+
+    headers = session.get.await_args_list[0].kwargs.get("headers", {})
+    assert headers.get("Authorization") == "Bearer test"
+    assert headers.get("X-CSRF-TOKEN") == "csrf-value-123"
+
+
+async def test_async_get_site_components_http_error():
+    """HTTP failures propagate to the caller."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_failing_response(status=403)])
+
+    client = _logged_in_client(session)
+    with pytest.raises(aiohttp.ClientResponseError):
+        await client.async_get_site_components()
