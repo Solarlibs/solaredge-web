@@ -1,0 +1,49 @@
+{
+    "siteId": 123,
+    "startDate": "2026-07-30",
+    "endDate": "2026-07-30",
+    "inverters": [
+        {
+            "serial": "7E012345-57",
+            "energy": {
+                "value": 41821.0,
+                "unit": "watt-hour"
+            },
+            "strings": [
+                {
+                    "energy": {
+                        "value": 23935.75,
+                        "unit": "watt-hour"
+                    },
+                    "stringRelativeOrder": 1
+                }
+            ],
+            "optimizers": [
+                {
+                    "serial": "7A012345-CA",
+                    "energy": {
+                        "value": 1596.25,
+                        "unit": "watt-hour"
+                    },
+                    "temperature": {
+                        "temperature": 125.6,
+                        "temperatureUnit": "FAHRENHEIT"
+                    },
+                    "color": 0.9774954072259645
+                },
+                {
+                    "serial": "7A012346-CA",
+                    "energy": {
+                        "value": 1422.25,
+                        "unit": "watt-hour"
+                    },
+                    "temperature": {
+                        "temperature": 118.4,
+                        "temperatureUnit": "FAHRENHEIT"
+                    },
+                    "color": 0.8709430496019596
+                }
+            ]
+        }
+    ]
+}

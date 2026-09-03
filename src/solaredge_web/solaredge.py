@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, NoReturn
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -644,6 +644,34 @@ class SolarEdgeWeb:
         end = (_as_naive(end_date) if end_date else datetime.now()).date()
         start = _as_naive(start_date).date() if start_date else end
 
+        resp_json = await self._async_fetch_by_inverter(start, end, include_temperature=False)
+        return _decode_energy_totals(resp_json, self._site_structure)
+
+    async def async_get_optimizer_temperatures(
+        self,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> dict[str, float]:
+        """Get each optimizer's highest temperature over a date range, in degrees Celsius.
+
+        Keyed by full optimizer serial, matching :meth:`async_get_equipment`.
+        The API reports whichever unit the site is configured for, so values
+        are converted to Celsius here.
+
+        This is a maximum over the range, not a current reading: with the
+        default of today it is the peak so far today. Optimizers that did not
+        report a temperature are absent from the result.
+        """
+        await self.async_get_equipment()
+
+        end = (_as_naive(end_date) if end_date else datetime.now()).date()
+        start = _as_naive(start_date).date() if start_date else end
+
+        resp_json = await self._async_fetch_by_inverter(start, end, include_temperature=True)
+        return _decode_optimizer_temperatures(resp_json)
+
+    async def _async_fetch_by_inverter(self, start: date, end: date, include_temperature: bool) -> dict[str, Any]:
+        """Fetch the per-inverter energy breakdown for a date range."""
         inverter_serials = _collect_inverter_serials(self._site_structure)
         if not inverter_serials:
             _LOGGER.warning("No inverters found in the layout for site %s", self.site_id)
@@ -653,14 +681,13 @@ class SolarEdgeWeb:
             ("start-date", start.isoformat()),
             ("end-date", end.isoformat()),
             *[("inverter-serials", serial) for serial in inverter_serials],
-            ("include-max-temperature", "false"),
+            ("include-max-temperature", "true" if include_temperature else "false"),
             ("include-color", "true"),
         ]
         url = f"{_BY_INVERTER_URL}/{self.site_id}/by-inverter?{urlencode(params)}"
 
-        _LOGGER.debug("Fetching energy totals for site: %s (%s..%s)", self.site_id, start, end)
-        resp_json = await self._async_get_json(url, "energy totals")
-        return _decode_energy_totals(resp_json, self._site_structure)
+        _LOGGER.debug("Fetching by-inverter data for site: %s (%s..%s)", self.site_id, start, end)
+        return await self._async_get_json(url, "by-inverter data")
 
     async def async_get_site_energy(
         self,
@@ -1132,6 +1159,37 @@ def _decode_energy_totals(resp_json: dict[str, Any], site_structure: dict[str, A
 
     _LOGGER.debug("Decoded energy totals for %s devices.", len(totals))
     return totals
+
+
+def _temperature_celsius(temperature: Any) -> float | None:
+    """Read a ``{"temperature": .., "temperatureUnit": ..}`` object as Celsius."""
+    if not isinstance(temperature, dict):
+        return None
+    value = _as_float(temperature.get("temperature"))
+    if value is None:
+        return None
+    unit = str(temperature.get("temperatureUnit") or "CELSIUS").upper()
+    if unit == "FAHRENHEIT":
+        return (value - 32.0) * 5.0 / 9.0
+    if unit != "CELSIUS":
+        _LOGGER.warning("Unknown temperature unit %r; assuming Celsius", unit)
+    return value
+
+
+def _decode_optimizer_temperatures(resp_json: dict[str, Any]) -> dict[str, float]:
+    """Decode a by-inverter response into max temperatures keyed by optimizer serial."""
+    temperatures: dict[str, float] = {}
+    for inverter in resp_json.get("inverters", []):
+        for optimizer in inverter.get("optimizers", []):
+            serial = optimizer.get("serial")
+            celsius = _temperature_celsius(optimizer.get("temperature"))
+            if serial and celsius is not None:
+                temperatures[serial] = celsius
+
+    if not temperatures:
+        # Expected on sites whose optimizers do not report temperature at all.
+        _LOGGER.debug("No optimizer temperatures in the by-inverter response.")
+    return temperatures
 
 
 def _decode_energy_graph(resp_json: dict[str, Any]) -> list[SiteEnergyData]:

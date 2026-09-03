@@ -20,6 +20,7 @@ from solaredge_web.solaredge import (
     _decode_energy_totals,
     _decode_playback,
     _decode_playback_verbose,
+    _temperature_celsius,
     _to_utc_iso,
 )
 
@@ -1216,3 +1217,62 @@ async def test_async_get_site_information_cache_cleared_by_login():
     await client.async_get_site_information()
 
     assert session.get.await_count == 3
+
+
+async def test_async_get_optimizer_temperatures_converts_to_celsius():
+    """Fahrenheit readings are converted, keyed by full optimizer serial."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("equipment.json")),
+            _mock_response(json_data=_load_fixture("layout_energy_by_inverter_temperature.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    temperatures = await client.async_get_optimizer_temperatures()
+
+    assert temperatures["7A012345-CA"] == pytest.approx(52.0)
+    assert temperatures["7A012346-CA"] == pytest.approx(48.0)
+    url = session.get.await_args_list[1].args[0]
+    assert "include-max-temperature=true" in url
+
+
+async def test_async_get_energy_totals_does_not_request_temperatures():
+    """Energy totals keep asking for the cheaper response."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("equipment.json")),
+            _mock_response(json_data=_load_fixture("layout_energy_by_inverter.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    await client.async_get_energy_totals()
+
+    assert "include-max-temperature=false" in session.get.await_args_list[1].args[0]
+
+
+async def test_async_get_optimizer_temperatures_absent_is_empty():
+    """Optimizers that report no temperature are simply left out."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("equipment.json")),
+            _mock_response(json_data=_load_fixture("layout_energy_by_inverter.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    assert await client.async_get_optimizer_temperatures() == {}
+
+
+def test_temperature_celsius_units():
+    """Celsius passes through, unknown units are assumed Celsius with a warning."""
+    assert _temperature_celsius({"temperature": 52.0, "temperatureUnit": "CELSIUS"}) == 52.0
+    assert _temperature_celsius({"temperature": 125.6, "temperatureUnit": "FAHRENHEIT"}) == pytest.approx(52.0)
+    # No unit at all is the API's Celsius default.
+    assert _temperature_celsius({"temperature": 40.0}) == 40.0
+    assert _temperature_celsius({"temperature": None, "temperatureUnit": "CELSIUS"}) is None
+    assert _temperature_celsius(None) is None
