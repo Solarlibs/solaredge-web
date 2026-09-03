@@ -93,6 +93,11 @@ _ENERGY_UNIT_TO_WH = {"watt-hour": 1.0, "kilo-watt-hour": 1000.0, "mega-watt-hou
 _LIVE_POWER_URL = f"{_DASHBOARD_BASE_URL}/live-power/sites"
 _POWER_FLOW_URL = f"{_DASHBOARD_BASE_URL}/power-flow/v2/sites"
 
+# Per-inverter energy totals and power series.
+_INVERTER_ENERGY_URL = f"{_DASHBOARD_BASE_URL}/inverters/energy/sites"
+_INVERTER_POWER_URL = f"{_DASHBOARD_BASE_URL}/inverters/power/sites"
+_MAX_INVERTER_POWER_SPAN = {"quarter-hours": timedelta(days=7), "hours": timedelta(days=31)}
+
 _SITE_POWER_URL = f"{_DASHBOARD_BASE_URL}/power/sites"
 _SITE_ENERGY_URL = f"{_DASHBOARD_BASE_URL}/energy/sites"
 
@@ -198,6 +203,19 @@ class SitePowerData:
 
     start_time: datetime
     power: float | None
+
+
+@dataclasses.dataclass
+class InverterPowerData:
+    """Per-inverter power for a single time slot. Values are in W.
+
+    start_time is naive and expressed in the site's local time. ``values`` maps
+    inverter serials to power; inverters that did not report for a slot are
+    absent rather than zero.
+    """
+
+    start_time: datetime
+    values: dict[str, float]
 
 
 @dataclasses.dataclass
@@ -951,6 +969,81 @@ class SolarEdgeWeb:
             )
         return start, end
 
+    async def async_get_inverter_energy_totals(
+        self,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> dict[str, float]:
+        """Get each inverter's total measured energy over a date range, in Wh.
+
+        Keyed by inverter serial. :meth:`async_get_energy_totals` reports the
+        same inverter figures alongside string and optimizer ones; this is the
+        cheaper call when only the inverters are wanted, and it is the one the
+        web app uses for its inverter comparison.
+        """
+        await self.async_login()
+        end = (_as_naive(end_date) if end_date else datetime.now()).date()
+        start = _as_naive(start_date).date() if start_date else end
+
+        params = [
+            ("start-date", start.isoformat()),
+            ("end-date", end.isoformat()),
+            ("normalized", "false"),
+            ("page-number", "0"),
+        ]
+        url = f"{_INVERTER_ENERGY_URL}/{self.site_id}?{urlencode(params)}"
+        resp_json = await self._async_get_json(url, "inverter energy totals")
+        return _decode_inverter_energy_totals(resp_json)
+
+    async def async_get_inverter_power(
+        self,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        resolution: str = "hours",
+    ) -> list[InverterPowerData]:
+        """Get per-inverter power per time slot. Values are in W.
+
+        ``resolution`` is ``hours`` or ``quarter-hours``. Defaults to the last
+        7 days.
+
+        The response identifies inverters only by their position in an array,
+        so the values are matched back to the layout by inverter order. That is
+        the same order the API numbers them in, but it does mean the layout has
+        to be fetched first.
+        """
+        if resolution not in _MAX_INVERTER_POWER_SPAN:
+            msg = f"Unsupported resolution {resolution!r}; expected one of {', '.join(_MAX_INVERTER_POWER_SPAN)}"
+            raise ValueError(msg)
+
+        await self.async_get_equipment()
+        serials = _collect_inverter_serials(self._site_structure)
+        if not serials:
+            _LOGGER.warning("No inverters found in the layout for site %s", self.site_id)
+            return []
+
+        end = (_as_naive(end_date) if end_date else datetime.now()).date()
+        start = _as_naive(start_date).date() if start_date else end - timedelta(days=7)
+        max_span = _MAX_INVERTER_POWER_SPAN[resolution]
+        if end - start > max_span:
+            _LOGGER.warning(
+                "Requested range %s..%s is wider than the %s days the API allows for %s; expect HTTP 400",
+                start,
+                end,
+                max_span.days,
+                resolution,
+            )
+
+        params = [
+            ("start-date", start.isoformat()),
+            ("end-date", end.isoformat()),
+            ("normalized", "false"),
+            ("chart-time-unit", resolution),
+            ("page-number", "0"),
+        ]
+        url = f"{_INVERTER_POWER_URL}/{self.site_id}?{urlencode(params)}"
+        resp_json = await self._async_get_json(url, "inverter power")
+        return _decode_inverter_power(resp_json, serials)
+
     async def async_get_live_power(self) -> LivePower:
         """Get the site's current power. Values are in W.
 
@@ -1287,20 +1380,31 @@ def _decode_dashboard_measurements(measurements: list[dict[str, Any]], scale: fl
 
 
 def _collect_inverter_serials(site_structure: dict[str, Any]) -> list[str]:
-    """List the serials of every inverter in the layout, in document order."""
-    serials: list[str] = []
+    """List the serials of every inverter in the layout, ordered.
+
+    Sorted by the layout's ``order``, which is how the API numbers inverters,
+    so a serial's position here matches its position in the arrays the
+    per-inverter power endpoint returns. Falls back to document order for
+    nodes without an order.
+    """
+    found: list[tuple[int, int, str]] = []
 
     def collect(node: dict[str, Any]) -> None:
         if node.get("type") == "INVERTER":
             serial = node.get("serial")
             if serial:
-                serials.append(serial)
+                raw_order = node.get("order")
+                try:
+                    order = int(raw_order) if raw_order is not None else len(found) + 1
+                except (TypeError, ValueError):
+                    order = len(found) + 1
+                found.append((order, len(found), serial))
         for child in node.get("children", []):
             collect(child)
 
     if site_structure:
         collect(site_structure)
-    return serials
+    return [serial for _, _, serial in sorted(found)]
 
 
 def _build_string_id_map(site_structure: dict[str, Any]) -> dict[tuple[str, int], str]:
@@ -1498,6 +1602,66 @@ def _decode_optimizer_temperatures(resp_json: dict[str, Any]) -> dict[str, float
     return temperatures
 
 
+def _decode_inverter_energy_totals(resp_json: dict[str, Any]) -> dict[str, float]:
+    """Decode an inverter energy response into Wh keyed by inverter serial."""
+    entries = resp_json.get("inverterEnergyList", [])
+    if not entries:
+        _LOGGER.warning("No inverters returned in the inverter energy response.")
+        return {}
+
+    unit = str(resp_json.get("energyUnit") or "watt-hour").lower()
+    factor = _ENERGY_UNIT_TO_WH.get(unit)
+    if factor is None:
+        _LOGGER.warning("Unknown energy unit %r; assuming watt-hour", unit)
+        factor = 1.0
+
+    totals: dict[str, float] = {}
+    for entry in entries:
+        serial = entry.get("inverterSerial")
+        energy = _as_float(entry.get("inverterEnergy"), factor)
+        if serial and energy is not None:
+            totals[serial] = energy
+    return totals
+
+
+def _decode_inverter_power(resp_json: dict[str, Any], serials: list[str]) -> list[InverterPowerData]:
+    """Decode a per-inverter power response, matching array positions to serials."""
+    entries = resp_json.get("invertersDatedPowerList", [])
+    if not entries:
+        _LOGGER.warning("No measurements returned in the inverter power response.")
+        return []
+
+    result: list[InverterPowerData] = []
+    for entry in entries:
+        raw_time = entry.get("measurementTime")
+        if not raw_time:
+            continue
+        try:
+            # The offset is the site's, so dropping it yields site-local time.
+            slot_time = _as_naive(datetime.fromisoformat(raw_time))
+        except (TypeError, ValueError):
+            _LOGGER.warning("Skipping inverter power entry with invalid time: %r", raw_time)
+            continue
+
+        values: dict[str, float] = {}
+        powers = entry.get("inverterPowerArray") or []
+        if len(powers) > len(serials):
+            _LOGGER.warning(
+                "Inverter power response has %s values but the layout has %s inverters; ignoring the extras",
+                len(powers),
+                len(serials),
+            )
+        # Lengths can disagree; the mismatch is reported above.
+        for serial, raw_power in zip(serials, powers, strict=False):
+            power = _as_float(raw_power)
+            if power is not None:
+                values[serial] = power
+        result.append(InverterPowerData(start_time=slot_time, values=values))
+
+    _LOGGER.debug("Decoded %s inverter power slots.", len(result))
+    return result
+
+
 def _decode_site_power(resp_json: dict[str, Any]) -> list[SitePowerData]:
     """Decode a site playback response into power slots."""
     measurements = resp_json.get("sitePowerMeasurements", [])
@@ -1622,6 +1786,7 @@ __all__ = [
     "ConsumptionData",
     "EnergyData",
     "InverterData",
+    "InverterPowerData",
     "LivePower",
     "OptimizerData",
     "SiteEnergyData",

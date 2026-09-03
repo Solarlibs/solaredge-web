@@ -1,0 +1,12 @@
+{
+    "inverterEnergyList": [
+        {
+            "inverterName": "Inverter 1",
+            "inverterSerial": "7E012345-57",
+            "inverterOrder": 1,
+            "inverterEnergy": 42665.0
+        }
+    ],
+    "externalProductionMeterEnergy": null,
+    "energyUnit": "watt-hour"
+}

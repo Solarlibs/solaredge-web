@@ -15,9 +15,12 @@ import pytest
 from solaredge_web import SolarEdgeWeb
 from solaredge_web.solaredge import (
     _build_opt_to_parent_map,
+    _collect_inverter_serials,
     _decode_dashboard_measurements,
     _decode_energy_graph,
     _decode_energy_totals,
+    _decode_inverter_energy_totals,
+    _decode_inverter_power,
     _decode_playback,
     _decode_playback_verbose,
     _decode_site_power,
@@ -1451,3 +1454,87 @@ def test_decode_site_power_empty(caplog):
     with caplog.at_level(logging.WARNING):
         assert _decode_site_power({"sitePowerMeasurements": []}) == []
     assert "No measurements returned in the site power response" in caplog.text
+
+
+async def test_async_get_inverter_energy_totals():
+    """Inverter energy totals are keyed by the serial the response carries."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(side_effect=[_mock_response(json_data=_load_fixture("inverter_energy_totals.json"))])
+
+    client = _logged_in_client(session)
+    totals = await client.async_get_inverter_energy_totals(datetime(2026, 7, 30), datetime(2026, 7, 30))
+
+    assert totals == {"7E012345-57": 42665.0}
+    url = session.get.await_args_list[0].args[0]
+    assert "services/dashboard/inverters/energy/sites/123" in url
+    assert "start-date=2026-07-30" in url
+
+
+def test_decode_inverter_energy_totals_converts_units():
+    """A kWh response is converted to Wh."""
+    resp = {
+        "inverterEnergyList": [{"inverterSerial": "7E012345-57", "inverterEnergy": 42.665}],
+        "energyUnit": "kilo-watt-hour",
+    }
+    assert _decode_inverter_energy_totals(resp)["7E012345-57"] == pytest.approx(42665.0)
+
+
+async def test_async_get_inverter_power_maps_array_to_serials():
+    """Array positions are matched to inverter serials by layout order."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock(
+        side_effect=[
+            _mock_response(json_data=_load_fixture("equipment.json")),
+            _mock_response(json_data=_load_fixture("inverter_power_hours.json")),
+        ]
+    )
+
+    client = _logged_in_client(session)
+    data = await client.async_get_inverter_power(datetime(2026, 7, 30), datetime(2026, 7, 30))
+
+    url = session.get.await_args_list[1].args[0]
+    assert "services/dashboard/inverters/power/sites/123" in url
+    assert "chart-time-unit=hours" in url
+    assert len(data) == 24
+    assert data[13].start_time == datetime(2026, 7, 30, 13, 0)
+    assert data[13].values == {"7E012345-57": 6648.364}
+    # Slots the inverter did not report are absent rather than zero.
+    assert data[0].values == {}
+    assert data[21].values == {"7E012345-57": 0.0}
+
+
+async def test_async_get_inverter_power_rejects_unknown_resolution():
+    """Days is not served by this endpoint."""
+    session = _make_mock_session(cookies=[_make_cookie("se_monitoring_auth", "session_value")])
+    session.get = AsyncMock()
+
+    client = _logged_in_client(session)
+    with pytest.raises(ValueError, match="Unsupported resolution"):
+        await client.async_get_inverter_power(resolution="days")
+
+    session.get.assert_not_awaited()
+
+
+def test_decode_inverter_power_warns_on_extra_values(caplog):
+    """More values than known inverters is reported, not silently dropped."""
+    resp = {
+        "invertersDatedPowerList": [{"measurementTime": "2026-07-30T13:00:00-07:00", "inverterPowerArray": [100.0, 200.0]}]
+    }
+    with caplog.at_level(logging.WARNING):
+        data = _decode_inverter_power(resp, ["7E012345-57"])
+
+    assert data[0].values == {"7E012345-57": 100.0}
+    assert "2 values but the layout has 1 inverters" in caplog.text
+
+
+def test_collect_inverter_serials_sorted_by_order():
+    """Inverters come back in the order the API numbers them."""
+    structure = {
+        "type": "SITE",
+        "children": [
+            {"type": "INVERTER", "serial": "INV-B", "order": 2},
+            {"type": "INVERTER", "serial": "INV-A", "order": 1},
+            {"type": "INVERTER", "serial": "INV-C"},
+        ],
+    }
+    assert _collect_inverter_serials(structure) == ["INV-A", "INV-B", "INV-C"]
