@@ -13,8 +13,8 @@ async with aiohttp.ClientSession() as session:
     client = SolarEdgeWeb(username, password, site_id, session)
 
     # --- site facts (all cached until the next login) ---
-    equipment = await client.async_get_equipment()          # inverters, strings, optimizers
-    components = await client.async_get_site_components()   # hasConsumptionAndGrid, hasStorage, ...
+    equipment = await client.async_get_equipment()  # inverters, strings, optimizers
+    components = await client.async_get_site_components()  # hasConsumptionAndGrid, hasStorage, ...
     information = await client.async_get_site_information()  # peakPower, siteTimeZone, ...
     availability = await client.async_get_data_availability()
     details = await client.async_get_site_details()
@@ -45,8 +45,8 @@ async with aiohttp.ClientSession() as session:
     inverter_power = await client.async_get_inverter_power()
 
     # --- per-device diagnostics ---
-    optimizers = await client.async_get_optimizer_data()   # live W, V, A per optimizer
-    inverters = await client.async_get_inverter_data()     # live readings and firmware
+    optimizers = await client.async_get_optimizer_data()  # live W, V, A per optimizer
+    inverters = await client.async_get_inverter_data()  # live readings and firmware
     temperatures = await client.async_get_optimizer_temperatures()  # max degrees C
 
     # --- everything else ---
