@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from http.cookies import Morsel
 from pathlib import Path
@@ -13,6 +14,7 @@ import aiohttp
 import pytest
 
 from solaredge_web import SolarEdgeWeb
+from solaredge_web.__main__ import _load_dotenv
 from solaredge_web.solaredge import (
     _build_opt_to_parent_map,
     _collect_inverter_serials,
@@ -1645,3 +1647,67 @@ async def test_async_get_storage_energy_distribution():
 
     with pytest.raises(ValueError, match="Unsupported resolution"):
         await client.async_get_storage_energy_distribution(resolution="weeks")
+
+
+def _load_test_env() -> dict[str, str]:
+    env = _load_dotenv(FIXTURES_DIR.parent.parent / ".env")
+    for key in ("SOLAREDGE_USERNAME", "SOLAREDGE_PASSWORD", "SOLAREDGE_SITE_ID"):
+        if val := os.environ.get(key):
+            env[key] = val
+    return env
+
+
+@pytest.mark.network
+async def test_live_solaredge_endpoints():
+    """Exercise the live SolarEdge Web API using credentials from .env or environment."""
+    env = _load_test_env()
+    username = env.get("SOLAREDGE_USERNAME")
+    password = env.get("SOLAREDGE_PASSWORD")
+    site_id = env.get("SOLAREDGE_SITE_ID")
+    if not username or not password or not site_id:
+        pytest.skip("SOLAREDGE_USERNAME, SOLAREDGE_PASSWORD, or SOLAREDGE_SITE_ID not set in .env or environment")
+
+    async with aiohttp.ClientSession() as session:
+        client = SolarEdgeWeb(
+            username=username,
+            password=password,
+            site_id=site_id,
+            session=session,
+        )
+
+        equipment = await client.async_get_equipment()
+        assert equipment
+        assert any(item.get("type") == "INVERTER" for item in equipment.values())
+
+        energy_data = await client.async_get_energy_data()
+        assert len(energy_data) > 0
+
+        components = await client.async_get_site_components()
+        assert components.get("inverterCount", 0) >= 1
+
+        availability = await client.async_get_data_availability()
+        assert availability.get("productionDataAvailableFrom")
+
+        consumption = await client.async_get_consumption_data()
+        assert len(consumption) > 0
+
+        totals = await client.async_get_energy_totals()
+        assert isinstance(totals, dict)
+
+        site_energy = await client.async_get_site_energy()
+        assert len(site_energy) > 0
+
+        live_power = await client.async_get_live_power()
+        assert live_power.max_power is not None
+
+        optimizers = await client.async_get_optimizer_data()
+        assert len(optimizers) > 0
+
+        temperatures = await client.async_get_optimizer_temperatures()
+        assert isinstance(temperatures, dict)
+
+        site_info = await client.async_get_site_information()
+        assert site_info.get("siteTimeZone")
+
+        inverters = await client.async_get_inverter_data()
+        assert len(inverters) > 0

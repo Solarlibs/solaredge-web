@@ -21,6 +21,10 @@ test = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "-m 'not network'"
+markers = [
+    "network: tests that hit the live SolarEdge Web API (deselected by default)",
+]
 
 
 [project.urls]
