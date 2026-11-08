@@ -24,8 +24,8 @@ testpaths = ["tests"]
 
 
 [project.urls]
-"Homepage" = "https://github.com/tronikos/solaredge-web"
-"Bug Tracker" = "https://github.com/tronikos/solaredge-web/issues"
+"Homepage" = "https://github.com/Solarlibs/solaredge-web"
+"Bug Tracker" = "https://github.com/Solarlibs/solaredge-web/issues"
 
 [build-system]
 requires = ["setuptools"]

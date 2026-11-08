@@ -100,14 +100,15 @@ def _format_time(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M")
 
 
-def _print_data(energy_data: list[EnergyData], first_optimizer: str, site_name: str, site_key: str) -> None:
+def _print_data(energy_data: list[EnergyData], first_optimizer: str | None, site_name: str, site_key: str) -> None:
     """Print hourly data for the first optimizer and the whole site."""
-    print(f"\n=== First Optimizer: {first_optimizer} ===")
-    print(f"{'Time (site local)':<20} {'Energy (Wh)':>12}")
-    print("-" * 34)
-    for ed in energy_data:
-        value = ed.values.get(first_optimizer, 0.0)
-        print(f"{_format_time(ed.start_time):<20} {value:>12.1f}")
+    if first_optimizer is not None:
+        print(f"\n=== First Optimizer: {first_optimizer} ===")
+        print(f"{'Time (site local)':<20} {'Energy (Wh)':>12}")
+        print("-" * 34)
+        for ed in energy_data:
+            value = ed.values.get(first_optimizer, 0.0)
+            print(f"{_format_time(ed.start_time):<20} {value:>12.1f}")
 
     print(f"\n=== Site Total: {site_name} ===")
     print(f"{'Time (site local)':<20} {'Energy (Wh)':>12}")
@@ -230,7 +231,10 @@ async def async_main() -> None:
                 print(f"  Start: {_format_time(first.start_time)} | End: {_format_time(last.start_time)}")
 
                 # Find the first optimizer (full serial) and the site device ID.
-                first_optimizer = next(eq_id for eq_id, data in equipment.items() if data.get("type") == "OPTIMIZER")
+                first_optimizer = next(
+                    (eq_id for eq_id, data in equipment.items() if data.get("type") == "OPTIMIZER"),
+                    None,
+                )
                 # Site aggregation is keyed by the site's device_id (identifier/uuid).
                 site_node = client._site_structure
                 site_key = _device_id(site_node) or site_id

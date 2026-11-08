@@ -12,7 +12,7 @@ import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, NoReturn
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 import aiohttp
 
@@ -297,6 +297,15 @@ class InverterData:
     dsp2_version: str | None = None
 
 
+def _generate_pkce_pair() -> tuple[str, str]:
+    """Generate a PKCE (code_verifier, code_challenge) pair for OAuth2 S256."""
+    verifier_bytes = os.urandom(32)
+    code_verifier = base64.urlsafe_b64encode(verifier_bytes).rstrip(b"=").decode("ascii")
+    challenge_bytes = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    code_challenge = base64.urlsafe_b64encode(challenge_bytes).rstrip(b"=").decode("ascii")
+    return code_verifier, code_challenge
+
+
 class SolarEdgeWeb:
     """SolarEdge Web client using the OAuth2 PKCE flow."""
 
@@ -336,10 +345,7 @@ class SolarEdgeWeb:
         _LOGGER.debug("Starting OAuth2 login flow...")
 
         try:
-            verifier_bytes = os.urandom(32)
-            code_verifier = base64.urlsafe_b64encode(verifier_bytes).rstrip(b"=").decode("ascii")
-            challenge_bytes = hashlib.sha256(code_verifier.encode("ascii")).digest()
-            code_challenge = base64.urlsafe_b64encode(challenge_bytes).rstrip(b"=").decode("ascii")
+            code_verifier, code_challenge = _generate_pkce_pair()
 
             auth_url = (
                 f"{_OAUTH_AUTHORIZE_URL}"
@@ -351,16 +357,19 @@ class SolarEdgeWeb:
             )
 
             resp = await self.session.get(auth_url, timeout=self.timeout)
-            # Drain the body so the connection returns to the pool even when the
-            # authorization code is already present in the redirect history.
-            await resp.read()
-            code = self._extract_code_from_history(resp)
+            try:
+                # Drain the body so the connection returns to the pool even when the
+                # authorization code is already present in the redirect history.
+                await resp.read()
+                code = self._extract_code_from_history(resp)
 
-            if not code:
-                code = await self._submit_login_form(resp)
+                if not code:
+                    code = await self._submit_login_form(resp)
 
-            if not code:
-                _raise_login_error(resp)
+                if not code:
+                    _raise_login_error(resp)
+            finally:
+                resp.release()
 
             _LOGGER.debug("Successfully obtained authorization code.")
 
@@ -373,10 +382,16 @@ class SolarEdgeWeb:
                 "code_verifier": code_verifier,
             }
             resp = await self.session.post(_OAUTH_TOKEN_URL, data=token_data, timeout=self.timeout)
-            resp.raise_for_status()
-            oauth_tokens = await resp.json()
+            try:
+                resp.raise_for_status()
+                oauth_tokens = await resp.json()
+                access_token = oauth_tokens.get("access_token") if isinstance(oauth_tokens, dict) else None
+                if not access_token:
+                    _raise_login_error(resp, "Failed to obtain access token during login.")
+            finally:
+                resp.release()
 
-            auth_headers = {"Authorization": f"Bearer {oauth_tokens['access_token']}"}
+            auth_headers = {"Authorization": f"Bearer {access_token}"}
 
             # Establish the backend monitoring session.
             resp = await self.session.post(
@@ -385,8 +400,11 @@ class SolarEdgeWeb:
                 headers=auth_headers,
                 timeout=self.timeout,
             )
-            resp.raise_for_status()
-            await resp.read()
+            try:
+                resp.raise_for_status()
+                await resp.read()
+            finally:
+                resp.release()
 
         except aiohttp.ClientError:
             _LOGGER.exception("Error during SolarEdge login")
@@ -410,11 +428,7 @@ class SolarEdgeWeb:
         form_html = raw_html
         if form_match:
             parsed_action = html.unescape(form_match.group(1))
-            if parsed_action.startswith("/"):
-                parsed_url = urlparse(str(resp.url))
-                action = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_action}"
-            else:
-                action = parsed_action
+            action = urljoin(str(resp.url), parsed_action)
             # Only scrape inputs belonging to this form, not the whole page.
             form_end = raw_html.lower().find("</form>", form_match.end())
             form_html = raw_html[form_match.end() : form_end if form_end != -1 else len(raw_html)]
@@ -434,8 +448,11 @@ class SolarEdgeWeb:
 
         _LOGGER.debug("Submitting login form to %s", action)
         resp = await self.session.post(action, data=form_data, timeout=self.timeout)
-        await resp.read()
-        return self._extract_code_from_history(resp)
+        try:
+            await resp.read()
+            return self._extract_code_from_history(resp)
+        finally:
+            resp.release()
 
     def _extract_code_from_history(self, resp: aiohttp.ClientResponse) -> str | None:
         """Scan redirect history for the OAuth authorization code."""
@@ -1193,9 +1210,12 @@ class SolarEdgeWeb:
         """POST a JSON body to a monitoring API endpoint and return the response."""
         try:
             resp = await self.session.post(url, json=payload, headers=self._request_headers(), timeout=self.timeout)
-            _LOGGER.debug("Got %s from %s", resp.status, url)
-            resp.raise_for_status()
-            resp_json: dict[str, Any] = await resp.json()
+            try:
+                _LOGGER.debug("Got %s from %s", resp.status, url)
+                resp.raise_for_status()
+                resp_json: dict[str, Any] = await resp.json()
+            finally:
+                resp.release()
         except aiohttp.ClientError:
             _LOGGER.exception("Error fetching %s from %s", description, url)
             raise
@@ -1218,9 +1238,12 @@ class SolarEdgeWeb:
         """GET a monitoring API endpoint and return the decoded JSON body."""
         try:
             resp = await self.session.get(url, headers=self._request_headers(), timeout=self.timeout)
-            _LOGGER.debug("Got %s from %s", resp.status, url)
-            resp.raise_for_status()
-            resp_json: dict[str, Any] = await resp.json()
+            try:
+                _LOGGER.debug("Got %s from %s", resp.status, url)
+                resp.raise_for_status()
+                resp_json: dict[str, Any] = await resp.json()
+            finally:
+                resp.release()
         except aiohttp.ClientError:
             _LOGGER.exception("Error fetching %s from %s", description, url)
             raise
@@ -1396,19 +1419,16 @@ def _decode_playback(
             offset_idx = 3 + (opt_idx * 2)
             if offset_idx >= len(compress_power):
                 continue
-            offset = int(compress_power[offset_idx])
-            val_idx = data_start_idx + offset + slot
-            if val_idx >= len(compress_power):
-                continue
-
-            raw = compress_power[val_idx]
-            if raw is None:
-                continue
             try:
-                power_w = float(raw)
+                offset = int(compress_power[offset_idx])
             except (TypeError, ValueError):
                 continue
-            if power_w <= 0:
+            val_idx = data_start_idx + offset + slot
+            if offset < 0 or val_idx < 0 or val_idx >= len(compress_power):
+                continue
+
+            power_w = _as_float(compress_power[val_idx])
+            if power_w is None or power_w <= 0:
                 continue
 
             # Per-optimizer value keyed by full serial (matching equipment dict).

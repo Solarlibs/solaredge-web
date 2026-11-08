@@ -413,6 +413,17 @@ def test_decode_playback_malformed_header_returns_empty():
         _decode_playback({"timeSlotsCount": "many", "optimizerSerials": ["X"], "compressPowerData": [2.0, 4.0]}, start, {})
         == []
     )
+    # Non-numeric or negative optimizer offsets are skipped without raising or indexing from the end.
+    result = _decode_playback(
+        {
+            "timeSlotsCount": 2,
+            "optimizerSerials": ["OPT_BAD", "OPT_NEG", "OPT_OK"],
+            "compressPowerData": [2.0, 8.0, 0.0, "bad", 0.0, -1, 0.0, 0, 100.0, 200.0],
+        },
+        start,
+        {},
+    )
+    assert [ed.values for ed in result] == [{"OPT_OK": 100.0}, {"OPT_OK": 200.0}]
 
 
 def test_decode_playback_verbose_matches_compact():
@@ -590,6 +601,45 @@ async def test_login_refuses_foreign_form_action():
         await client.async_login()
     assert err.value.status == 401
     session.post.assert_not_awaited()
+
+
+async def test_login_resolves_relative_form_action():
+    """A relative form action without a leading slash is resolved against the page URL."""
+    login_page = _mock_response(
+        text='<html><form action="authenticate?step=1"><input name="csrf" value="abc"></form></html>',
+        url="https://login.solaredge.com/oauth2/login",
+    )
+    callback_resp = _mock_response(
+        url="https://monitoring.solaredge.com/mfe/auth/callback?code=test_code",
+    )
+    token_resp = _mock_response(json_data={"access_token": "test_token"})
+    exchange_resp = _mock_response(json_data={"ok": True})
+
+    session = _make_mock_session()
+    session.get = AsyncMock(side_effect=[login_page])
+    session.post = AsyncMock(side_effect=[callback_resp, token_resp, exchange_resp])
+
+    client = SolarEdgeWeb("u", "p", "123", session, timeout=5)
+    await client.async_login()
+
+    assert session.post.await_args_list[0].args[0] == "https://login.solaredge.com/oauth2/authenticate?step=1"
+
+
+async def test_login_missing_access_token_raises_401():
+    """A token response without access_token surfaces as HTTP 401 ClientResponseError."""
+    auth_resp = _mock_response(
+        url="https://monitoring.solaredge.com/mfe/auth/callback?code=test_code",
+    )
+    token_resp = _mock_response(json_data={"error": "invalid_grant"})
+
+    session = _make_mock_session()
+    session.get = AsyncMock(side_effect=[auth_resp])
+    session.post = AsyncMock(side_effect=[token_resp])
+
+    client = SolarEdgeWeb("u", "p", "123", session, timeout=5)
+    with pytest.raises(aiohttp.ClientResponseError) as err:
+        await client.async_login()
+    assert err.value.status == 401
 
 
 async def test_extract_code_ignores_foreign_callback():
